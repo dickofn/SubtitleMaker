@@ -28,6 +28,10 @@ Runs on Windows, Linux, and macOS.
 - tkinter (bundled on Windows and macOS; a separate package on Linux)
 - Optional: an NVIDIA GPU with CUDA 12 for a large speedup
 
+On Linux both X11 and Wayland sessions work. Tk has no native Wayland
+backend, so under Wayland the window is served by XWayland — which is present
+by default on every mainstream desktop, and is the only extra requirement.
+
 ## Installation
 
 Clone the repository, then create the virtual environment.
@@ -147,6 +151,21 @@ git-ignored for that reason — check before sharing it.
 
 **`ModuleNotFoundError: No module named 'tkinter'` on Linux** — tkinter is a
 system package, not a pip one. See [Installation](#linux).
+
+**`no display name and no $DISPLAY environment variable` on Linux** — the app
+reached a session with neither X11 nor XWayland available. On a deliberately
+Wayland-only setup, install your distribution's `xorg-xwayland` package.
+
+**Blurry or undersized text on a HiDPI Wayland desktop** — XWayland does not
+inherit the compositor's fractional scaling, so Tk sizes itself for 96 DPI.
+Launch with a scaling factor to compensate:
+
+```
+GDK_DPI_SCALE=1 ./SubtitleMaker.sh
+```
+
+or set Tk's own factor by adding `root.tk.call('tk', 'scaling', 1.5)` in
+`main()`.
 
 **CUDA is not used even with a GPU present** — the log states the resolved
 device and compute type on every run. A missing cuDNN 9 is the usual cause;

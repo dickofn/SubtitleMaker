@@ -105,11 +105,16 @@ MEDIA_EXTENSIONS = (
 def _media_filetypes():
     """Build the open dialog's filters, which are platform-sensitive.
 
-    Tk delegates glob matching to the native dialog: Windows matches
-    case-insensitively and reads "*.*" as "everything", while X11 matches
-    case-sensitively and only matches "*.*" against names containing a dot.
-    So on Linux a plain "*.mp4" hides MOVIE.MP4, and "*.*" hides
-    extensionless files. Character classes fix the first, "*" the second.
+    On Windows and macOS Tk calls the native file dialog, which matches
+    case-insensitively and reads "*.*" as "everything". On Unix it draws its
+    own dialog and matches with Tcl's glob, which is case-sensitive and only
+    matches "*.*" against names containing a dot - so a plain "*.mp4" hides
+    MOVIE.MP4 and "*.*" hides extensionless files. Character classes fix the
+    first, "*" the second.
+
+    This follows the Tk build, not the display server: Tk has no native
+    Wayland backend and runs through XWayland, so a Wayland session gets the
+    same Unix dialog and needs the same patterns.
     """
     if sys.platform == "win32":
         return [
@@ -497,11 +502,7 @@ class SubtitleMakerApp:
 
         self.log_frame = ttk.LabelFrame(self.root, text="Log")
 
-        # TkFixedFont resolves to whatever monospace font the platform
-        # actually has; naming Consolas outright silently falls back to a
-        # proportional face anywhere it is not installed, Linux included.
-        log_font = tkfont.nametofont("TkFixedFont").copy()
-        log_font.configure(size=9)
+        log_font = self._monospace_font(9)
 
         self.log_text = ScrolledText(
             self.log_frame, height=10, wrap="word", state="disabled",
@@ -522,6 +523,31 @@ class SubtitleMakerApp:
         self.log_toggle.pack(side="left", padx=4)
         ttk.Button(self.buttons, text="Clear", command=self.clear_log).pack(side="left", padx=4)
         ttk.Button(self.buttons, text="Open log file", command=self.open_log).pack(side="left", padx=4)
+
+    # Ordered by preference; the first one actually installed wins.
+    MONOSPACE_FAMILIES = (
+        "Consolas",           # Windows
+        "SF Mono", "Menlo",   # macOS
+        "DejaVu Sans Mono", "Liberation Mono", "Noto Sans Mono",  # Linux
+    )
+
+    def _monospace_font(self, size):
+        """Resolve a monospace font that exists on this machine.
+
+        Naming one family outright is unsafe: Tk silently substitutes a
+        proportional face wherever that family is missing, so the log panel
+        would quietly stop lining up. TkFixedFont always exists but resolves
+        to Courier New on Windows, so it is the last resort rather than the
+        first choice.
+        """
+        available = set(tkfont.families(self.root))
+        for family in self.MONOSPACE_FAMILIES:
+            if family in available:
+                return (family, size)
+
+        fallback = tkfont.nametofont("TkFixedFont").copy()
+        fallback.configure(size=size)
+        return fallback
 
     def _labelled_combo(self, parent, label, variable, values):
         row = ttk.Frame(parent)
