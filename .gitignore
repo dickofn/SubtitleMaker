@@ -1,0 +1,16 @@
+# Virtual environment
+.venv/
+
+# Python bytecode
+__pycache__/
+*.py[cod]
+
+# Runtime artifacts written into the app directory.
+# error.log records every processed filename and its full local path -
+# never commit it.
+error.log
+error.log.*
+settings.json
+
+# Editor / backup files
+*.bak
