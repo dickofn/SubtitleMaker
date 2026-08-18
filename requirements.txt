@@ -1,0 +1,31 @@
+# SubtitleMaker dependencies — Python 3.13, verified 2026-08-15
+#
+# Recreate the environment with:
+#   Windows:  py -3.13 -m venv .venv
+#             .venv\Scripts\python.exe -m pip install -r requirements.txt
+#   Linux:    python3 -m venv .venv
+#             .venv/bin/python -m pip install -r requirements.txt
+#
+# Tkinter ships with the python.org Windows installer but is a separate
+# system package on most Linux distributions - pip cannot supply it:
+#   Debian/Ubuntu:  sudo apt install python3-tk
+#   Fedora:         sudo dnf install python3-tkinter
+#   Arch:           sudo pacman -S tk
+#
+# GPU note: CUDA runs on cuBLAS and cuDNN 9, neither of which pip installs
+# here. On Windows they come from the CUDA 12.8 toolkit on PATH and from
+# C:\Windows\System32. On Linux, install the distro's CUDA runtime and
+# libcudnn9 packages, or add the pip wheels:
+#   pip install nvidia-cublas-cu12 nvidia-cudnn-cu12
+# CPU-only machines need none of this; pick "CPU" in the device dropdown.
+
+faster-whisper==1.2.1
+srt==3.5.3
+
+# Pulled in automatically by faster-whisper; pinned for reproducibility.
+av==18.1.0
+ctranslate2==4.8.1
+huggingface_hub==1.27.0
+numpy==2.5.2
+onnxruntime==1.28.0
+tokenizers==0.23.1
