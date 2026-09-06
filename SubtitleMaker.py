@@ -139,6 +139,9 @@ MEDIA_TYPES = _media_filetypes()
 
 # Batches trade VRAM for speed; 8 is comfortable on 8GB+ cards.
 BATCH_SIZE = 8
+# Whisper's encoder window. Batched inference only transcribes the chunks it is
+# handed, and none of them may be longer than this.
+CHUNK_SECONDS = 30.0
 # Don't repaint the GUI more often than this (seconds) - progress fires per segment.
 UI_REFRESH_INTERVAL = 0.1
 # How often the main thread drains queued log records and GUI updates, and how
@@ -154,10 +157,20 @@ AUDIO_FIFO_SAMPLES = 500_000
 DURATION_TOLERANCE = 0.02
 # Longest a single subtitle may stay on screen, in seconds.
 MAX_SUBTITLE_DURATION = 10.0
+# Length of a run of identical consecutive cues that counts as Whisper looping
+# rather than someone genuinely repeating themselves.
+REPEAT_RUN_MIN = 3
+# Warn when the silence filter throws away more than this share of a file. It
+# is the usual reason a transcript covers the opening minutes and then stops.
+VAD_REMOVAL_WARN_RATIO = 0.6
 
 WINDOW_WIDTH = 620
 WINDOW_HEIGHT = 800
 MIN_WIDTH = 560
+# Lines reserved for the status text, and the length past which a filename in
+# it is elided. Together they keep the status line a constant height.
+STATUS_LINES = 2
+STATUS_NAME_MAX = 60
 
 
 def setup_logging():
@@ -284,6 +297,33 @@ def unique_srt_path(media_path, taken):
     return f"{stem}{ext}.srt"
 
 
+def shorten(name, limit=STATUS_NAME_MAX):
+    """Elide the middle of a long filename, keeping the start and extension."""
+    if len(name) <= limit:
+        return name
+    head = (limit - 3) // 2
+    return name[:head] + "..." + name[len(name) - (limit - 3 - head):]
+
+
+def fixed_clip_timestamps(duration):
+    """Cover the whole timeline with encoder-sized windows, in seconds.
+
+    BatchedInferencePipeline only transcribes the chunks it is given, and with
+    the VAD off it refuses to guess: any file longer than one encoder window
+    raises "No clip timestamps found". Handing it contiguous windows is what
+    makes the silence filter genuinely optional in batched mode.
+
+    Windows are absolute, and faster-whisper leaves caller-supplied clips on
+    the original timeline, so no timestamp remapping is needed afterwards.
+    """
+    clips = []
+    start = 0.0
+    while start < duration:
+        clips.append({"start": start, "end": min(start + CHUNK_SECONDS, duration)})
+        start += CHUNK_SECONDS
+    return clips
+
+
 def decode_audio(path, should_stop=None):
     """Decode to 16 kHz mono float32, skipping corrupt packets.
 
@@ -334,9 +374,35 @@ def decode_audio(path, should_stop=None):
                 fifo.write(frame)
             drain()
         drain(force=True)
+        # The resampler buffers internally too; flushing it keeps the last
+        # fraction of a second of audio.
+        for out in resampler.resample(None):
+            buffer.write(out.to_ndarray())
 
     audio = np.frombuffer(buffer.getbuffer(), dtype=np.int16)
     return audio.astype(np.float32) / 32768.0, skipped, container_duration
+
+
+def drop_repeat_runs(subtitles):
+    """Keep only the first cue of each run of identical consecutive lines.
+
+    Over audio with no clear speech - crowd noise or music - Whisper latches
+    onto one phrase and emits it again and again for as long as the noise
+    lasts. Two identical lines in a row can be real; a dozen never is.
+    """
+    kept = []
+    run_start = 0
+    for position in range(len(subtitles) + 1):
+        same = (
+            position < len(subtitles)
+            and subtitles[position].content == subtitles[run_start].content
+        )
+        if same:
+            continue
+        run = subtitles[run_start:position]
+        kept.extend(run[:1] if len(run) >= REPEAT_RUN_MIN else run)
+        run_start = position
+    return kept
 
 
 def build_subtitles(segments):
@@ -356,13 +422,10 @@ def build_subtitles(segments):
             end = start + timedelta(seconds=MAX_SUBTITLE_DURATION)
 
         subtitles.append(
-            srt.Subtitle(
-                index=len(subtitles) + 1,
-                start=start,
-                end=end,
-                content=content,
-            )
+            srt.Subtitle(index=0, start=start, end=end, content=content)
         )
+
+    subtitles = drop_repeat_runs(subtitles)
 
     # Whisper sometimes emits segments that overlap by a fraction of a second.
     # Trim the earlier cue so a player never shows two lines at once. The
@@ -371,6 +434,10 @@ def build_subtitles(segments):
     for current, following in zip(subtitles, subtitles[1:]):
         if current.start < following.start < current.end:
             current.end = following.start
+
+    # Numbered only now, so dropped repeats leave no gaps in the sequence.
+    for position, subtitle in enumerate(subtitles, start=1):
+        subtitle.index = position
 
     return subtitles
 
@@ -458,12 +525,24 @@ class SubtitleMakerApp:
         options = ttk.LabelFrame(self.root, text="Options")
         options.pack(pady=6, **pad)
 
-        self.vad_var = tk.BooleanVar(value=True)
+        # Off by default: the detector decides what Whisper is even allowed to
+        # see, and it is far more eager to discard audio than most people
+        # expect - see the note below.
+        self.vad_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(
             options,
-            text="Filter silence (recommended - avoids hallucinated repeats)",
+            text="Filter silence before transcribing (faster)",
             variable=self.vad_var,
         ).pack(anchor="w", padx=8, pady=(6, 0))
+        ttk.Label(
+            options,
+            text="Only audio the detector hears as speech is transcribed. "
+                 "Quiet, sung, or heavily mixed speech is dropped, so long "
+                 "stretches can come out with no subtitles.",
+            foreground="gray",
+            wraplength=520,
+            justify="left",
+        ).pack(anchor="w", padx=28, pady=(0, 4))
 
         self.batched_var = tk.BooleanVar(value=True)
         ttk.Checkbutton(
@@ -494,11 +573,24 @@ class SubtitleMakerApp:
             self.root, variable=self.progress_var, maximum=100
         ).pack(fill="x", padx=16, pady=12)
 
-        self.status_label = ttk.Label(
-            self.root, text="Idle", foreground="gray",
-            wraplength=560, justify="left",
+        # Reserve a fixed height for the status text. It is the only widget
+        # whose length changes while a batch runs, and letting it reflow eats
+        # the space the button row below needs: pack hands out what is left in
+        # packing order, so with the log panel hidden the buttons are what
+        # falls off the bottom of the window.
+        status_area = ttk.Frame(
+            self.root,
+            height=(tkfont.nametofont("TkDefaultFont").metrics("linespace")
+                    * STATUS_LINES),
         )
-        self.status_label.pack(padx=16, fill="x")
+        status_area.pack(padx=16, fill="x")
+        status_area.pack_propagate(False)
+
+        self.status_label = ttk.Label(
+            status_area, text="Idle", foreground="gray",
+            wraplength=560, justify="left", anchor="nw",
+        )
+        self.status_label.pack(fill="both", expand=True)
 
         self.log_frame = ttk.LabelFrame(self.root, text="Log")
 
@@ -819,7 +911,7 @@ class SubtitleMakerApp:
                     skipped += 1
                     continue
 
-                self.post(self.set_status, f"[{index + 1}/{total}] {name}")
+                self.post(self.set_status, f"[{index + 1}/{total}] {shorten(name)}")
                 try:
                     if self._transcribe_one(transcribe, path, srt_path, index, total):
                         done += 1
@@ -856,19 +948,32 @@ class SubtitleMakerApp:
 
         if settings.batched:
             pipeline = BatchedInferencePipeline(model=model)
-            return lambda audio: pipeline.transcribe(
-                audio,
-                language=settings.language,
-                task=task,
-                vad_filter=settings.vad_filter,
-                batch_size=BATCH_SIZE,
-                # Batched mode defaults to without_timestamps=True, which makes
-                # segment bounds come from merged VAD chunks instead of from
-                # Whisper. On sparse speech that yields single subtitles many
-                # minutes long. Asking for timestamps costs ~25% speed and
-                # brings segment length back in line with sequential mode.
-                without_timestamps=False,
-            )
+
+            def batched(audio):
+                # Without the VAD there is nothing to split the audio on, so
+                # supply plain fixed windows instead of letting the pipeline
+                # bail out.
+                clips = None
+                if not settings.vad_filter:
+                    clips = fixed_clip_timestamps(len(audio) / AUDIO_SAMPLE_RATE)
+
+                return pipeline.transcribe(
+                    audio,
+                    language=settings.language,
+                    task=task,
+                    vad_filter=settings.vad_filter,
+                    clip_timestamps=clips,
+                    batch_size=BATCH_SIZE,
+                    # Batched mode defaults to without_timestamps=True, which
+                    # makes segment bounds come from merged chunks instead of
+                    # from Whisper. On sparse speech that yields single
+                    # subtitles many minutes long. Asking for timestamps costs
+                    # ~25% speed and brings segment length back in line with
+                    # sequential mode.
+                    without_timestamps=False,
+                )
+
+            return batched
 
         return lambda audio: model.transcribe(
             audio,
@@ -880,9 +985,12 @@ class SubtitleMakerApp:
 
     def _transcribe_one(self, transcribe, path, srt_path, index, total):
         name = os.path.basename(path)
+        # The full name goes to the log; the status line gets an elided one so
+        # it always fits the height reserved for it.
+        label = shorten(name)
         logging.info("Processing file %d/%d: %s", index + 1, total, name)
 
-        self.post(self.set_status, f"[{index + 1}/{total}] Decoding audio: {name}")
+        self.post(self.set_status, f"[{index + 1}/{total}] Decoding audio: {label}")
         decoded = decode_audio(path, should_stop=self.stop_event.is_set)
         if decoded is None:
             logging.info("Stopped while decoding %s", name)
@@ -912,13 +1020,26 @@ class SubtitleMakerApp:
             name, info.language, (info.language_probability or 0) * 100,
         )
 
+        # duration_after_vad equals duration when the filter is off, so this
+        # only ever fires when the filter really did discard the audio.
+        removed = info.duration - info.duration_after_vad
+        if info.duration and removed > info.duration * VAD_REMOVAL_WARN_RATIO:
+            logging.warning(
+                "%s: the silence filter dropped %s of %s. Whatever it did not "
+                'hear as speech gets no subtitles - untick "Filter silence" if '
+                "whole stretches come out empty.",
+                name,
+                timedelta(seconds=int(removed)),
+                timedelta(seconds=int(info.duration)),
+            )
+
         segments = []
         for segment in segment_iter:
             if self.stop_event.is_set():
                 logging.info("Stopped mid-file; discarding partial output for %s", name)
                 return False
             segments.append(segment)
-            self._report_progress(name, segment.end, duration, index, total)
+            self._report_progress(label, segment.end, duration, index, total)
 
         if not segments:
             logging.warning("No speech found in %s; no subtitles written.", name)
@@ -933,7 +1054,7 @@ class SubtitleMakerApp:
         logging.info("Saved %d subtitles to %s", len(subtitles), srt_path)
         return True
 
-    def _report_progress(self, name, position, duration, index, total):
+    def _report_progress(self, label, position, duration, index, total):
         now = time.monotonic()
         if now - self._last_ui_update < UI_REFRESH_INTERVAL:
             return
@@ -944,7 +1065,7 @@ class SubtitleMakerApp:
             self.post(self.set_progress, ((index + ratio) / total) * 100)
             self.post(
                 self.set_status,
-                f"[{index + 1}/{total}] {name} - {int(ratio * 100)}%",
+                f"[{index + 1}/{total}] {label} - {int(ratio * 100)}%",
             )
 
     # ------------------------------------------------- completion (main thread)

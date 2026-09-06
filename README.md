@@ -120,7 +120,7 @@ for translating into any other language.
 
 | Option | Default | Effect |
 | --- | --- | --- |
-| Filter silence (VAD) | on | Skips silent stretches. Strongly recommended — it is what prevents Whisper from hallucinating repeated lines over silence. |
+| Filter silence (VAD) | off | Faster, but only audio the detector hears as speech reaches Whisper. Quiet, sung, or heavily mixed speech is discarded, so whole stretches come out with no subtitles at all. Turn it on for clean dialogue; leave it off if anything is going missing. |
 | Batched inference | on | Batch size 8. Much faster; trades VRAM for speed. |
 | Skip files that already have subtitles | on | Lets an interrupted batch be re-run cheaply. |
 
@@ -174,5 +174,14 @@ faster-whisper cannot load CUDA without it.
 **Out of memory on GPU** — turn off batched inference, or use a smaller model
 or `int8` precision.
 
-**Repeated or nonsense lines over quiet passages** — leave "Filter silence" on.
-This is a known Whisper failure mode on silence, not a decoding bug.
+**Subtitles stop partway through, or whole stretches are empty** — "Filter
+silence" is the usual cause: the detector decides what Whisper is allowed to
+see, and it is far stricter than it sounds. On material where speech is quiet,
+sung, or buried under music it can discard 90% of a file, and none of
+that audio gets subtitles. The log warns when it drops more than 60% of a file.
+Turn the option off and re-run.
+
+**Repeated or nonsense lines over quiet passages** — a known Whisper failure
+mode on silence, not a decoding bug. Runs of three or more identical
+consecutive lines are collapsed to one automatically; turning "Filter silence"
+on suppresses the rest, at the cost of the stretches described above.
