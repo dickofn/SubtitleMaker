@@ -17,6 +17,7 @@ import sys
 import threading
 import time
 import traceback
+import unicodedata
 import tkinter as tk
 from dataclasses import dataclass
 from datetime import timedelta
@@ -159,6 +160,16 @@ AUDIO_FIFO_SAMPLES = 500_000
 DURATION_TOLERANCE = 0.02
 # Longest a single subtitle may stay on screen, in seconds.
 MAX_SUBTITLE_DURATION = 10.0
+# Shortest, too. Whisper can close a cue almost as soon as it opens it, and a
+# quarter-second flash is unreadable however correct it is. A cue is only
+# stretched into the gap that follows it, never over the next line.
+MIN_SUBTITLE_DURATION = 1.0
+# Columns a subtitle line may occupy before it is folded, counting East Asian
+# characters as the two columns they are drawn in. 42 is the usual broadcast
+# figure and about what a player will show without shrinking the text.
+SUBTITLE_LINE_COLUMNS = 42
+# Punctuation that may never be left stranded at the start of a folded line.
+NEVER_STARTS_A_LINE = frozenset("、。，．！？・）」』］｝,.!?)]}")
 # Length of a run of identical consecutive cues that counts as Whisper looping
 # rather than someone genuinely repeating themselves.
 REPEAT_RUN_MIN = 3
@@ -181,23 +192,24 @@ HALLUCINATION_MAX_RATE = 1.0
 LOOP_MIN_REPETITION = 0.9
 # Below this many characters a repetition score means nothing either way.
 LOOP_MIN_CHARS = 8
-# The silence filter only cuts a stretch out when the detector hears nothing
-# for this long. Shorter pauses stay in, so a line keeps the rhythm around it
-# instead of being spliced against a moment from minutes away.
+# Windows of speech sampled to identify the language, spread evenly across a
+# file. Whisper reads the language off the start of whatever it is handed, and
+# the start of a file is very often music, a logo sting or silence - which is
+# how a Japanese film ends up transcribed as Norwegian from end to end.
+LANGUAGE_SAMPLE_WINDOWS = 6
+# Below this confidence the guess is worth saying out loud: everything that
+# follows is written in whichever language was picked.
+LANGUAGE_CONFIDENCE_WARN = 0.5
+# Speech detection settings. These only decide where to listen from when
+# naming the language - nothing is ever skipped on the detector's say-so.
+# Measured on this material it hears as little as a tenth of the speech in a
+# file, so it is trusted to find some speech and never to find all of it.
+# Pauses shorter than this stay inside a region rather than splitting it.
 SILENCE_GAP_SECONDS = 4.0
-# Kept either side of every stretch of speech, so a soft onset or a trailing
-# word never gets clipped off by the detector.
+# Kept either side of a region, so a soft onset survives into the sample.
 SPEECH_PAD_SECONDS = 0.5
-# Silero's own default is 0.5, which writes off whispering, singing and speech
-# under music. A false positive only costs a little time; a false negative
-# loses subtitles outright, so lean towards keeping the audio.
+# Silero's own default is 0.5, which writes off quiet and sung speech.
 VAD_SPEECH_THRESHOLD = 0.3
-# Keeping less than this share of a file means the detector failed rather than
-# found a quiet file, so the filter stands down instead.
-VAD_MIN_KEEP_RATIO = 0.05
-# Past this share skipped, say so loudly: it is the usual reason a transcript
-# covers the opening minutes and then stops.
-VAD_REMOVAL_WARN_RATIO = 0.6
 
 WINDOW_WIDTH = 620
 WINDOW_HEIGHT = 800
@@ -275,7 +287,6 @@ class Settings:
     precision_label: str
     language: "str | None"
     translate: bool
-    vad_filter: bool
     batched: bool
     skip_existing: bool
 
@@ -341,11 +352,15 @@ def shorten(name, limit=STATUS_NAME_MAX):
 
 
 def speech_regions(audio):
-    """Locate the speech in decoded audio, as {start, end} pairs in seconds.
+    """Locate speech in decoded audio, as {start, end} pairs in seconds.
 
-    Only silences longer than SILENCE_GAP_SECONDS separate one region from the
-    next; Silero is told to wait that long before closing a region, so ordinary
-    pauses stay inside it. Returns an empty list when it hears nothing.
+    Used only to decide where to listen from when naming the language. It is
+    not used to choose what gets transcribed, and must not be: on quiet or
+    heavily mixed audio this detector hears a fraction of what is said, so
+    skipping whatever it misses throws away a fifth of the dialogue. Picking
+    listening posts tolerates that, because it only needs to find some speech.
+
+    Returns an empty list when it hears nothing at all.
     """
     chunks = get_speech_timestamps(
         audio,
@@ -364,43 +379,15 @@ def speech_regions(audio):
     ]
 
 
-def widen_regions(regions, duration):
-    """Grow speech regions until each is worth a pass, then merge what overlaps.
-
-    A clip costs a full encoder pass whatever its length, because the features
-    are padded out to a whole window either way. Handing the model a one-second
-    burst therefore costs as much as a thirty-second one, and a file of
-    scattered bursts would run slower with the filter on than off. Widening
-    each region with the audio that actually surrounds it costs nothing,
-    absorbs neighbouring bursts into the same pass, and gives Whisper the
-    run-up it needs to decode a line in context.
-
-    Nothing is rearranged: regions stay on the original timeline, so widening
-    only ever takes in real audio from either side.
-    """
-    widened = []
-    for region in regions:
-        start = max(0.0, region["start"])
-        end = min(duration, region["end"])
-        if end - start < CHUNK_SECONDS:
-            # Take the audio that follows, then whatever precedes, rather than
-            # spending a pass on mostly padding.
-            end = min(duration, start + CHUNK_SECONDS)
-            start = max(0.0, end - CHUNK_SECONDS)
-        if widened and start <= widened[-1]["end"]:
-            widened[-1]["end"] = max(widened[-1]["end"], end)
-            continue
-        widened.append({"start": start, "end": end})
-    return widened
-
-
 def split_clips(regions):
     """Cut regions into windows the batched pipeline can swallow.
 
-    BatchedInferencePipeline transcribes only the first CHUNK_SECONDS of any
-    clip it is handed and warns about the rest, so regions have to arrive
-    pre-cut. Windows stay absolute, and faster-whisper leaves caller-supplied
-    clips on the original timeline, so no timestamp remapping follows.
+    BatchedInferencePipeline only transcribes the clips it is given, and
+    without them it refuses to guess: any file longer than one encoder window
+    raises "No clip timestamps found". It also transcribes just the first
+    CHUNK_SECONDS of any clip and warns about the rest, so the timeline has to
+    arrive pre-cut. Windows stay absolute, and faster-whisper leaves
+    caller-supplied clips where they are, so no timestamp remapping follows.
 
     A region is divided evenly rather than sliced into full windows with the
     remainder trailing behind. Both cost the same number of passes, but an even
@@ -421,58 +408,55 @@ def split_clips(regions):
     return clips
 
 
-def plan_regions(audio, name, use_vad):
-    """Choose which stretches of a file to transcribe, or None for all of it.
+def language_montage(audio, regions):
+    """Windows of speech taken at even spacing through a file, joined up.
 
-    The silence filter stops here rather than being handed to faster-whisper.
-    Its own filter concatenates the speech it keeps and maps the timestamps
-    back afterwards, so Whisper decodes windows stitched together from moments
-    minutes apart - which is what sends it into repeat loops and lets one cue
-    run on until the next burst of speech. Here the detector only says where to
-    point the model: the audio it hears is real and contiguous, and it picks up
-    again at the next speech by itself.
+    Only ever used to name the language. Whisper reads that off the start of
+    whatever it is given, and the start of a file is the least representative
+    part of it - a logo sting, a music bed, a quiet establishing shot. Hand it
+    speech drawn from the whole running time instead. Splicing does no harm
+    here: this audio is never transcribed or timed, only listened to.
     """
-    if not use_vad:
-        return None
+    window = int(CHUNK_SECONDS * AUDIO_SAMPLE_RATE)
+    if not regions:
+        return audio[: LANGUAGE_SAMPLE_WINDOWS * window]
 
-    duration = len(audio) / AUDIO_SAMPLE_RATE
-    regions = speech_regions(audio)
-    heard = sum(region["end"] - region["start"] for region in regions)
-    if heard < duration * VAD_MIN_KEEP_RATIO:
+    speech = sum(region["end"] - region["start"] for region in regions)
+    picks = []
+    for index in range(LANGUAGE_SAMPLE_WINDOWS):
+        # Walk this far into the speech, counting only the speech.
+        target, seen = speech * (index + 0.5) / LANGUAGE_SAMPLE_WINDOWS, 0.0
+        for region in regions:
+            length = region["end"] - region["start"]
+            if seen + length >= target:
+                at = int((region["start"] + target - seen) * AUDIO_SAMPLE_RATE)
+                picks.append(audio[at:at + window])
+                break
+            seen += length
+    return np.concatenate(picks) if picks else audio[:window]
+
+
+def detect_language(model, audio, regions, name):
+    """Name the spoken language, listening across the whole file."""
+    language, confidence, _ = model.detect_language(
+        audio=language_montage(audio, regions),
+        language_detection_segments=LANGUAGE_SAMPLE_WINDOWS,
+        # Score every sample and let the majority carry it. The default settles
+        # on the first window to clear a low bar, which over a quiet opening is
+        # exactly how a confident wrong answer gets in.
+        language_detection_threshold=1.0,
+    )
+    if confidence < LANGUAGE_CONFIDENCE_WARN:
         logging.warning(
-            "%s: the silence filter heard almost no speech, which means the "
-            "audio is mixed too quietly for the detector rather than that the "
-            "file is silent. Transcribing all of it instead.", name,
+            "%s: heard %s, but only %.0f%% sure. Everything is transcribed as "
+            "that language, so set the language by hand if the result reads "
+            "like nonsense.", name, language, confidence * 100,
         )
-        return None
-
-    widened = widen_regions(regions, duration)
-    covered = sum(region["end"] - region["start"] for region in widened)
-    skipped = duration - covered
-    if not widened or skipped <= 0:
-        return None
-
-    # One silence between each pair of regions, plus any at either end.
-    stretches = (
-        len(widened) - 1
-        + (widened[0]["start"] > 0)
-        + (widened[-1]["end"] < duration)
-    )
-    level = (
-        logging.WARNING
-        if skipped > duration * VAD_REMOVAL_WARN_RATIO
-        else logging.INFO
-    )
-    logging.log(
-        level,
-        "%s: skipping %s of %s, in %d stretch(es) with no speech in them. "
-        'Untick "Skip long silences" if those stretches should have had '
-        "subtitles.", name,
-        timedelta(seconds=int(skipped)),
-        timedelta(seconds=int(duration)),
-        stretches,
-    )
-    return widened
+    else:
+        logging.info(
+            "%s: heard %s (%.0f%% confidence).", name, language, confidence * 100,
+        )
+    return language
 
 
 def decode_audio(path, should_stop=None):
@@ -600,6 +584,97 @@ def is_looping(content, seconds):
     return repetition(content) >= LOOP_MIN_REPETITION
 
 
+def display_width(text):
+    """Columns this text occupies, counting East Asian characters as two."""
+    return sum(2 if unicodedata.east_asian_width(ch) in "WF" else 1 for ch in text)
+
+
+def _chop(unit):
+    """Cut a run with no break in it down to line-sized pieces.
+
+    Nothing said aloud looks like this, but a URL or a long identifier does,
+    and one of those must not be allowed to run off the side of the frame.
+    """
+    while display_width(unit) > SUBTITLE_LINE_COLUMNS:
+        taken = width = 0
+        while taken < len(unit):
+            step = display_width(unit[taken])
+            if width + step > SUBTITLE_LINE_COLUMNS:
+                break
+            width += step
+            taken += 1
+        yield unit[:taken]
+        unit = unit[taken:]
+    if unit:
+        yield unit
+
+
+def _units(text):
+    """Split into the smallest pieces a line may be broken between.
+
+    A Latin word travels with its trailing space and is kept whole; an East
+    Asian character is its own unit, because that writing has no spaces to
+    break at and breaking between characters is what readers expect.
+    """
+    unit = ""
+    for char in text:
+        if unicodedata.east_asian_width(char) in "WF":
+            if unit:
+                yield from _chop(unit)
+                unit = ""
+            yield char
+        elif char == " ":
+            yield from _chop(unit + char)
+            unit = ""
+        else:
+            unit += char
+    if unit:
+        yield from _chop(unit)
+
+
+def wrap_caption(text):
+    """Fold a cue onto as few lines as will hold it, balanced evenly.
+
+    Whisper returns a sentence as one long run. Left alone, a line wider than
+    the frame is either shrunk or cut off by the player, and East Asian text
+    hits that at half the character count because each character is drawn
+    double width. Lines are balanced rather than filled greedily, so a cue
+    never breaks as one full line and one stray word.
+    """
+    text = " ".join(text.split())
+    width = display_width(text)
+    if width <= SUBTITLE_LINE_COLUMNS:
+        return text
+
+    lines = ceil(width / SUBTITLE_LINE_COLUMNS)
+    target = width / lines
+    folded, line, filled = [], "", 0
+    for unit in _units(text):
+        span = display_width(unit)
+        # Break to stay inside the frame, or to keep the lines even. The width
+        # test is not optional, so it ignores the planned line count.
+        if line and (
+            filled + span > SUBTITLE_LINE_COLUMNS
+            or (filled >= target and len(folded) < lines - 1)
+        ):
+            # Closing punctuation never starts a line: let it ride past the
+            # edge instead. The allowance is one full-width mark and no more,
+            # so neither a run of punctuation nor a word that merely begins
+            # with some can drag a line out.
+            riding = (
+                unit[:1] in NEVER_STARTS_A_LINE
+                and filled + span <= SUBTITLE_LINE_COLUMNS + 2
+            )
+            if not riding:
+                folded.append(line.strip())
+                line, filled = "", 0
+        line += unit
+        filled += span
+    if line.strip():
+        folded.append(line.strip())
+    return "\n".join(folded)
+
+
 def build_subtitles(segments):
     """Convert Whisper segments to srt.Subtitle, dropping empty ones."""
     subtitles = []
@@ -629,7 +704,7 @@ def build_subtitles(segments):
             end = start + timedelta(seconds=MAX_SUBTITLE_DURATION)
 
         subtitles.append(
-            srt.Subtitle(index=0, start=start, end=end, content=content)
+            srt.Subtitle(index=0, start=start, end=end, content=wrap_caption(content))
         )
 
     if stretched or looping:
@@ -647,13 +722,23 @@ def build_subtitles(segments):
         )
     subtitles = drop_repeat_runs(subtitles)
 
-    # Whisper sometimes emits segments that overlap by a fraction of a second.
-    # Trim the earlier cue so a player never shows two lines at once. The
-    # start comparison keeps a badly ordered pair from getting a negative
-    # duration.
-    for current, following in zip(subtitles, subtitles[1:]):
-        if current.start < following.start < current.end:
-            current.end = following.start
+    # One pass for timing. Whisper both overlaps cues by a fraction of a second
+    # and closes some of them almost immediately, so every cue is pulled back
+    # off the next one and then given as much of the gap after it as it needs
+    # to be readable. Both only ever move an end, never a start, so the cues
+    # stay in order.
+    minimum = timedelta(seconds=MIN_SUBTITLE_DURATION)
+    for position, subtitle in enumerate(subtitles):
+        following = subtitles[position + 1] if position + 1 < len(subtitles) else None
+        ceiling = following.start if following else subtitle.end + minimum
+        if subtitle.end > ceiling:
+            subtitle.end = ceiling
+        if subtitle.end - subtitle.start < minimum:
+            subtitle.end = min(ceiling, subtitle.start + minimum)
+        # A cue the next one starts on top of keeps a sliver, so it stays valid
+        # srt rather than becoming a zero-length or reversed entry.
+        if subtitle.end <= subtitle.start:
+            subtitle.end = subtitle.start + timedelta(milliseconds=1)
 
     # Numbered only now, so dropped repeats leave no gaps in the sequence.
     for position, subtitle in enumerate(subtitles, start=1):
@@ -691,7 +776,7 @@ class SubtitleMakerApp:
         self._build_widgets()
         # minsize is derived from the real required height in here, so the
         # buttons can never be clipped in either state.
-        self._on_language_change()
+        self._on_language_change(chosen=False)
         self._apply_log_visibility(bool(self.config.get("log_visible", True)))
         self._attach_log_handler()
         self._drain_job = self.root.after(UI_POLL_INTERVAL_MS, self._drain_queues)
@@ -704,23 +789,31 @@ class SubtitleMakerApp:
         settings = ttk.LabelFrame(self.root, text="Model")
         settings.pack(pady=(12, 6), **pad)
 
-        self.model_var = tk.StringVar(value=DEFAULT_MODEL)
+        self.model_var = tk.StringVar(
+            value=self._remembered("model", DEFAULT_MODEL, MODELS)
+        )
         model_combo = self._labelled_combo(settings, "Model:", self.model_var, MODELS)
         model_combo.bind("<<ComboboxSelected>>", lambda _e: self._update_model_note())
 
         self.model_note = ttk.Label(settings, foreground="gray", wraplength=520)
         self.model_note.pack(anchor="w", padx=16, pady=(0, 6))
 
-        self.device_var = tk.StringVar(value=DEFAULT_DEVICE)
+        self.device_var = tk.StringVar(
+            value=self._remembered("device", DEFAULT_DEVICE, DEVICES)
+        )
         self._labelled_combo(settings, "Device:", self.device_var, tuple(DEVICES))
 
-        self.precision_var = tk.StringVar(value="Auto")
+        self.precision_var = tk.StringVar(
+            value=self._remembered("precision", "Auto", PRECISIONS)
+        )
         self._labelled_combo(settings, "Precision:", self.precision_var, PRECISIONS)
 
         language = ttk.LabelFrame(self.root, text="Language")
         language.pack(pady=6, **pad)
 
-        self.language_var = tk.StringVar(value=AUTO_DETECT)
+        self.language_var = tk.StringVar(
+            value=self._remembered("language", AUTO_DETECT, LANGUAGES)
+        )
         language_combo = self._labelled_combo(
             language, "Spoken language:", self.language_var, tuple(LANGUAGES)
         )
@@ -728,7 +821,7 @@ class SubtitleMakerApp:
             "<<ComboboxSelected>>", lambda _e: self._on_language_change()
         )
 
-        self.translate_var = tk.BooleanVar(value=True)
+        self.translate_var = tk.BooleanVar(value=self._remembered("translate", True))
         self.translate_check = ttk.Checkbutton(
             language,
             text="Translate to English",
@@ -745,33 +838,16 @@ class SubtitleMakerApp:
         options = ttk.LabelFrame(self.root, text="Options")
         options.pack(pady=6, **pad)
 
-        # Off by default: skipping a stretch is still a judgement call made
-        # by a detector that cannot hear everything - see the note below.
-        self.vad_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(
-            options,
-            text="Skip long silences (faster on sparse audio)",
-            variable=self.vad_var,
-        ).pack(anchor="w", padx=8, pady=(6, 0))
-        ttk.Label(
-            options,
-            text=f"Stretches with no speech for over {SILENCE_GAP_SECONDS:.0f} "
-                 "seconds are passed over; everything else is transcribed in "
-                 "place, pauses and all. Quiet speech under music can still be "
-                 "mistaken for silence and skipped.",
-            foreground="gray",
-            wraplength=520,
-            justify="left",
-        ).pack(anchor="w", padx=28, pady=(0, 4))
-
-        self.batched_var = tk.BooleanVar(value=True)
+        self.batched_var = tk.BooleanVar(value=self._remembered("batched", True))
         ttk.Checkbutton(
             options,
             text=f"Batched inference (much faster, batch size {BATCH_SIZE})",
             variable=self.batched_var,
-        ).pack(anchor="w", padx=8)
+        ).pack(anchor="w", padx=8, pady=(6, 0))
 
-        self.skip_existing_var = tk.BooleanVar(value=True)
+        self.skip_existing_var = tk.BooleanVar(
+            value=self._remembered("skip_existing", True)
+        )
         ttk.Checkbutton(
             options,
             text="Skip files that already have subtitles",
@@ -842,6 +918,36 @@ class SubtitleMakerApp:
         "SF Mono", "Menlo",   # macOS
         "DejaVu Sans Mono", "Liberation Mono", "Noto Sans Mono",  # Linux
     )
+
+    def _remembered(self, key, default, allowed=None):
+        """A saved choice, or the default if it is missing or no longer valid.
+
+        A settings file can outlive the build that wrote it - a model dropped
+        from the list, a hand-edited value, a file from a newer version - so
+        anything that is not still on offer falls back rather than leaving the
+        app pointing at something it cannot use.
+        """
+        value = self.config.get(key, default)
+        if type(value) is not type(default):
+            return default
+        if allowed is not None and value not in allowed:
+            logging.info("Ignoring saved %s %r; it is no longer offered.", key, value)
+            return default
+        return value
+
+    def _remember(self):
+        """Persist every control, so the next run opens where this one left."""
+        self.config.update(
+            model=self.model_var.get(),
+            device=self.device_var.get(),
+            precision=self.precision_var.get(),
+            language=self.language_var.get(),
+            translate=self.translate_var.get(),
+            batched=self.batched_var.get(),
+            skip_existing=self.skip_existing_var.get(),
+            log_visible=self.log_visible,
+        )
+        save_config(self.config)
 
     def _monospace_font(self, size):
         """Resolve a monospace font that exists on this machine.
@@ -983,14 +1089,18 @@ class SubtitleMakerApp:
 
     # ------------------------------------------------------------ lifecycle
 
-    def _on_language_change(self):
+    def _on_language_change(self, chosen=True):
         """Translating English into English is a no-op, so tie the two together.
 
         Any other source language (including auto-detect) defaults to
         translating, which is the common case for foreign-language media.
+        That default belongs to picking a language, though, not to starting
+        up: on startup a saved choice has to survive. English is the exception
+        either way, because the box is about to be disabled.
         """
         is_english = LANGUAGES[self.language_var.get()] == "en"
-        self.translate_var.set(not is_english)
+        if chosen or is_english:
+            self.translate_var.set(not is_english)
         self.translate_check.config(state="disabled" if is_english else "normal")
         self._update_model_note()
 
@@ -1064,7 +1174,6 @@ class SubtitleMakerApp:
             precision_label=self.precision_var.get(),
             language=LANGUAGES[self.language_var.get()],
             translate=self.translate_var.get(),
-            vad_filter=self.vad_var.get(),
             batched=self.batched_var.get(),
             skip_existing=self.skip_existing_var.get(),
         )
@@ -1091,6 +1200,7 @@ class SubtitleMakerApp:
         if self.log_handler is not None:
             logging.getLogger().removeHandler(self.log_handler)
 
+        self._remember()
         self.root.destroy()
 
     def open_log(self):
@@ -1166,6 +1276,19 @@ class SubtitleMakerApp:
         """Return a callable with a single signature for both pipelines."""
         task = "translate" if settings.translate else "transcribe"
 
+        def prepare(audio, name):
+            """Settle the language before anything is decoded."""
+            language = settings.language
+            if language is None:
+                # Listening posts only - every second of audio is transcribed
+                # either way.
+                language = detect_language(
+                    model, audio, speech_regions(audio), name
+                )
+            else:
+                logging.info("%s: transcribing as %s, as set.", name, language)
+            return language
+
         # Both pipelines take the windows planned here instead of running
         # their own silence filter, which would splice the surviving speech
         # together before Whisper ever saw it.
@@ -1173,16 +1296,16 @@ class SubtitleMakerApp:
             pipeline = BatchedInferencePipeline(model=model)
 
             def batched(audio, name):
+                language = prepare(audio, name)
                 duration = len(audio) / AUDIO_SAMPLE_RATE
-                regions = plan_regions(audio, name, settings.vad_filter)
-                if regions is None:
-                    regions = [{"start": 0.0, "end": duration}]
 
                 return pipeline.transcribe(
                     audio,
-                    language=settings.language,
+                    language=language,
                     task=task,
-                    clip_timestamps=split_clips(regions),
+                    clip_timestamps=split_clips(
+                        [{"start": 0.0, "end": duration}]
+                    ),
                     batch_size=BATCH_SIZE,
                     # Batched mode defaults to without_timestamps=True, which
                     # makes segment bounds come from merged chunks instead of
@@ -1196,25 +1319,15 @@ class SubtitleMakerApp:
             return batched
 
         def sequential(audio, name):
-            regions = plan_regions(audio, name, settings.vad_filter)
             return model.transcribe(
                 audio,
-                language=settings.language,
+                language=prepare(audio, name),
                 task=task,
-                # Flattened into start, end, start, end... in seconds. Regions
-                # are left whole here rather than cut into windows: within one
-                # the model advances to wherever the last segment ended, so it
-                # stops on a sentence instead of every thirty seconds. "0" is
-                # faster-whisper's own way of saying the entire file.
-                clip_timestamps=(
-                    [
-                        bound
-                        for region in regions
-                        for bound in (region["start"], region["end"])
-                    ]
-                    if regions
-                    else "0"
-                ),
+                # "0" is faster-whisper's own way of saying the whole file.
+                # Sequential mode needs no windows: it advances to wherever the
+                # last segment ended, so it stops on a sentence rather than
+                # every thirty seconds.
+                clip_timestamps="0",
                 condition_on_previous_text=False,
             )
 
@@ -1253,10 +1366,6 @@ class SubtitleMakerApp:
         self.post(self.set_status, f"[{index + 1}/{total}] Transcribing: {label}")
         segment_iter, info = transcribe(audio, name)
         duration = info.duration or audio_duration
-        logging.info(
-            "Detected language for %s: %s (%.0f%% confidence)",
-            name, info.language, (info.language_probability or 0) * 100,
-        )
 
         segments = []
         for segment in segment_iter:

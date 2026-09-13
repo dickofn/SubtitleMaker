@@ -12,6 +12,14 @@ Runs on Windows, Linux, and macOS.
 - **Batch processing** — select any number of files; progress is reported per
   file and per segment.
 - **Transcribe or translate** — Whisper's translate task outputs English.
+- **Finds the language by listening to the whole file** — not just its
+  opening, which is usually music or silence and is how a Japanese film
+  gets transcribed as Norwegian from end to end.
+- **Drops what Whisper invents over silence** — the stock "Thank you for
+  watching." held for thirty seconds, and lines it repeats until the screen
+  is full.
+- **Readable cues** — folded to subtitle width, never left on screen too
+  briefly to read, never overlapping.
 - **GPU or CPU** — CUDA when available, with automatic fallback to a compute
   type the hardware actually supports.
 - **Survives corrupt media** — packets are demuxed and decoded one at a time,
@@ -21,6 +29,8 @@ Runs on Windows, Linux, and macOS.
 - **Resumable batches** — files that already have subtitles can be skipped, and
   a running batch can be stopped after the current file.
 - **Built-in log panel** — collapsible, with a rotating `error.log` on disk.
+- **Remembers your choices** — model, device, precision, language and the
+  option switches all come back as you left them.
 
 ## Requirements
 
@@ -116,11 +126,23 @@ This selects the **spoken** language of the source, not the output language.
 Whisper's translate task only ever produces English; there is no model support
 for translating into any other language.
 
+Auto-detect listens at six points spread across the file, choosing them from
+where speech was actually found, and takes the majority verdict. Whisper itself
+reads the language off the beginning of whatever it is handed, and the
+beginning of a film is a logo sting, a music bed or silence — which is how a
+Japanese film gets identified as Norwegian and then transcribed as Norwegian
+from end to end. On two of three test files the opening thirty seconds gave the
+wrong language outright (`nn` at 66%, `en` at 54%); sampling across the file
+gave `ja` at 71% and 99%.
+
+The log always says which language was used and how sure it was, and warns when
+it is under 50%. If a transcript comes back as nonsense, that line is the first
+place to look — set the language by hand and re-run.
+
 ### Processing options
 
 | Option | Default | Effect |
 | --- | --- | --- |
-| Skip long silences (VAD) | off | Passes over stretches where the detector hears no speech for more than four seconds. Everything else is transcribed where it lies, pauses and all, and the model picks up again at the next speech. Worth it on sparse audio; quiet speech under music can still be mistaken for silence and skipped, so leave it off if anything goes missing. |
 | Batched inference | on | Batch size 8. Much faster; trades VRAM for speed. |
 | Skip files that already have subtitles | on | Lets an interrupted batch be re-run cheaply. |
 
@@ -131,8 +153,19 @@ Each subtitle file is written beside its source: `video.mp4` produces
 `video.mkv` in the same folder — the second keeps its extension and becomes
 `video.mkv.srt` so neither result is lost.
 
-Overlapping segments are trimmed so no subtitle outlives the start of the next,
-and any segment left open by Whisper is capped at 10 seconds.
+Cues are tidied on the way out:
+
+- **Folded to width.** Whisper returns a sentence as one long run. Lines are
+  balanced onto as few lines as will hold them at 42 columns, counting East
+  Asian characters as the two columns they are drawn in, so Japanese folds at
+  21 characters rather than running off the side of the frame.
+- **Long enough to read.** A cue Whisper closes almost as soon as it opens is
+  given up to a second, taken from the gap after it and never from the next
+  cue.
+- **Never overlapping.** No subtitle outlives the start of the next, and any
+  segment left open by Whisper is capped at 10 seconds.
+- **Nothing invented.** See [Troubleshooting](#troubleshooting) for the three
+  kinds of made-up line that are removed automatically.
 
 ## Files
 
@@ -142,7 +175,7 @@ and any segment left open by Whisper is capped at 10 seconds.
 | `SubtitleMaker.bat` / `SubtitleMaker.sh` | Launchers |
 | `requirements.txt` | Pinned dependencies |
 | `error.log` | Rotating log, 1 MB × 3 (git-ignored) |
-| `settings.json` | Persisted UI preferences (git-ignored) |
+| `settings.json` | Model, device, language and option choices (git-ignored) |
 
 `error.log` records the full path and filename of every file processed. It is
 git-ignored for that reason — check before sharing it.
@@ -174,13 +207,22 @@ faster-whisper cannot load CUDA without it.
 **Out of memory on GPU** — turn off batched inference, or use a smaller model
 or `int8` precision.
 
-**Subtitles stop partway through, or whole stretches are empty** — "Skip long
-silences" is the usual cause. The detector is stricter than it sounds: on
-material where speech is quiet, sung, or buried under music it can hear
-speech in a tenth of a file, and the rest is passed over. The log says how
-much was skipped, and warns when that is more than 60% of a file. Turn the option
-off and re-run. If it hears almost nothing at all it stands down by itself and
-transcribes the whole file, with a warning saying so.
+**The whole transcript is in the wrong language, or reads as nonsense** — the
+language was detected wrongly. It is picked by listening across the file rather
+than to its opening, which fixes the common case, but quiet or heavily mixed
+speech can still fool it. The log line beginning `heard` says which language was
+used and how sure it was. Set **Spoken language** by hand and re-run.
+
+Note that a wrong language does not produce gibberish — it produces fluent,
+plausible text in the wrong language, which is easy to mistake for a bad
+transcription. If the output reads like a different film, check that line.
+
+**Subtitles stop partway through, or whole stretches are empty** — every second
+of audio is transcribed, so this is not the app skipping anything. It is either
+audio that genuinely stops (the log warns when less audio was decoded than the
+container promised, which points at a damaged file), or speech quiet enough
+that Whisper itself returns nothing for it. A larger model is the only real
+remedy for the latter.
 
 **Repeated or nonsense lines, or one line repeated until it fills the screen**
 — a known Whisper failure mode on silence, not a decoding bug. Three kinds are
@@ -202,5 +244,5 @@ is nothing to remove:
 - Runs of three or more identical consecutive lines are collapsed to one.
 
 The log says how many of each were dropped, and debug logging prints them.
-None of the three depends on "Skip long silences", so you get them with the
-filter off.
+None of the three ever skips audio: every second of the file is still
+transcribed, and only the lines themselves are judged.
