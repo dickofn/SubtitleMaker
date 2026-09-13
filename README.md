@@ -120,7 +120,7 @@ for translating into any other language.
 
 | Option | Default | Effect |
 | --- | --- | --- |
-| Filter silence (VAD) | off | Faster, but only audio the detector hears as speech reaches Whisper. Quiet, sung, or heavily mixed speech is discarded, so whole stretches come out with no subtitles at all. Turn it on for clean dialogue; leave it off if anything is going missing. |
+| Skip long silences (VAD) | off | Passes over stretches where the detector hears no speech for more than four seconds. Everything else is transcribed where it lies, pauses and all, and the model picks up again at the next speech. Worth it on sparse audio; quiet speech under music can still be mistaken for silence and skipped, so leave it off if anything goes missing. |
 | Batched inference | on | Batch size 8. Much faster; trades VRAM for speed. |
 | Skip files that already have subtitles | on | Lets an interrupted batch be re-run cheaply. |
 
@@ -174,14 +174,15 @@ faster-whisper cannot load CUDA without it.
 **Out of memory on GPU** — turn off batched inference, or use a smaller model
 or `int8` precision.
 
-**Subtitles stop partway through, or whole stretches are empty** — "Filter
-silence" is the usual cause: the detector decides what Whisper is allowed to
-see, and it is far stricter than it sounds. On material where speech is quiet,
-sung, or buried under music it can discard 90% of a file, and none of
-that audio gets subtitles. The log warns when it drops more than 60% of a file.
-Turn the option off and re-run.
+**Subtitles stop partway through, or whole stretches are empty** — "Skip long
+silences" is the usual cause. The detector is stricter than it sounds: on
+material where speech is quiet, sung, or buried under music it can hear
+speech in a tenth of a file, and the rest is passed over. The log says how much
+was skipped, and warns when that is more than 60% of a file. Turn the option
+off and re-run. If it hears almost nothing at all it stands down by itself and
+transcribes the whole file, with a warning saying so.
 
 **Repeated or nonsense lines over quiet passages** — a known Whisper failure
 mode on silence, not a decoding bug. Runs of three or more identical
-consecutive lines are collapsed to one automatically; turning "Filter silence"
-on suppresses the rest, at the cost of the stretches described above.
+consecutive lines are collapsed to one automatically; turning "Skip long
+silences" on suppresses the rest, at the cost of the stretches described above.

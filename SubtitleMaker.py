@@ -20,6 +20,7 @@ import traceback
 import tkinter as tk
 from dataclasses import dataclass
 from datetime import timedelta
+from math import ceil
 from logging.handlers import RotatingFileHandler
 from tkinter import filedialog, font as tkfont, messagebox, ttk
 from tkinter.scrolledtext import ScrolledText
@@ -29,6 +30,7 @@ import ctranslate2
 import numpy as np
 import srt
 from faster_whisper import BatchedInferencePipeline, WhisperModel
+from faster_whisper.vad import VadOptions, get_speech_timestamps
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 LOG_PATH = os.path.join(APP_DIR, "error.log")
@@ -160,8 +162,22 @@ MAX_SUBTITLE_DURATION = 10.0
 # Length of a run of identical consecutive cues that counts as Whisper looping
 # rather than someone genuinely repeating themselves.
 REPEAT_RUN_MIN = 3
-# Warn when the silence filter throws away more than this share of a file. It
-# is the usual reason a transcript covers the opening minutes and then stops.
+# The silence filter only cuts a stretch out when the detector hears nothing
+# for this long. Shorter pauses stay in, so a line keeps the rhythm around it
+# instead of being spliced against a moment from minutes away.
+SILENCE_GAP_SECONDS = 4.0
+# Kept either side of every stretch of speech, so a soft onset or a trailing
+# word never gets clipped off by the detector.
+SPEECH_PAD_SECONDS = 0.5
+# Silero's own default is 0.5, which writes off whispering, singing and speech
+# under music. A false positive only costs a little time; a false negative
+# loses subtitles outright, so lean towards keeping the audio.
+VAD_SPEECH_THRESHOLD = 0.3
+# Keeping less than this share of a file means the detector failed rather than
+# found a quiet file, so the filter stands down instead.
+VAD_MIN_KEEP_RATIO = 0.05
+# Past this share skipped, say so loudly: it is the usual reason a transcript
+# covers the opening minutes and then stops.
 VAD_REMOVAL_WARN_RATIO = 0.6
 
 WINDOW_WIDTH = 620
@@ -305,23 +321,139 @@ def shorten(name, limit=STATUS_NAME_MAX):
     return name[:head] + "..." + name[len(name) - (limit - 3 - head):]
 
 
-def fixed_clip_timestamps(duration):
-    """Cover the whole timeline with encoder-sized windows, in seconds.
+def speech_regions(audio):
+    """Locate the speech in decoded audio, as {start, end} pairs in seconds.
 
-    BatchedInferencePipeline only transcribes the chunks it is given, and with
-    the VAD off it refuses to guess: any file longer than one encoder window
-    raises "No clip timestamps found". Handing it contiguous windows is what
-    makes the silence filter genuinely optional in batched mode.
+    Only silences longer than SILENCE_GAP_SECONDS separate one region from the
+    next; Silero is told to wait that long before closing a region, so ordinary
+    pauses stay inside it. Returns an empty list when it hears nothing.
+    """
+    chunks = get_speech_timestamps(
+        audio,
+        VadOptions(
+            threshold=VAD_SPEECH_THRESHOLD,
+            min_silence_duration_ms=int(SILENCE_GAP_SECONDS * 1000),
+            speech_pad_ms=int(SPEECH_PAD_SECONDS * 1000),
+        ),
+    )
+    return [
+        {
+            "start": chunk["start"] / AUDIO_SAMPLE_RATE,
+            "end": chunk["end"] / AUDIO_SAMPLE_RATE,
+        }
+        for chunk in chunks
+    ]
 
-    Windows are absolute, and faster-whisper leaves caller-supplied clips on
-    the original timeline, so no timestamp remapping is needed afterwards.
+
+def widen_regions(regions, duration):
+    """Grow speech regions until each is worth a pass, then merge what overlaps.
+
+    A clip costs a full encoder pass whatever its length, because the features
+    are padded out to a whole window either way. Handing the model a one-second
+    burst therefore costs as much as a thirty-second one, and a file of
+    scattered bursts would run slower with the filter on than off. Widening
+    each region with the audio that actually surrounds it costs nothing,
+    absorbs neighbouring bursts into the same pass, and gives Whisper the
+    run-up it needs to decode a line in context.
+
+    Nothing is rearranged: regions stay on the original timeline, so widening
+    only ever takes in real audio from either side.
+    """
+    widened = []
+    for region in regions:
+        start = max(0.0, region["start"])
+        end = min(duration, region["end"])
+        if end - start < CHUNK_SECONDS:
+            # Take the audio that follows, then whatever precedes, rather than
+            # spending a pass on mostly padding.
+            end = min(duration, start + CHUNK_SECONDS)
+            start = max(0.0, end - CHUNK_SECONDS)
+        if widened and start <= widened[-1]["end"]:
+            widened[-1]["end"] = max(widened[-1]["end"], end)
+            continue
+        widened.append({"start": start, "end": end})
+    return widened
+
+
+def split_clips(regions):
+    """Cut regions into windows the batched pipeline can swallow.
+
+    BatchedInferencePipeline transcribes only the first CHUNK_SECONDS of any
+    clip it is handed and warns about the rest, so regions have to arrive
+    pre-cut. Windows stay absolute, and faster-whisper leaves caller-supplied
+    clips on the original timeline, so no timestamp remapping follows.
+
+    A region is divided evenly rather than sliced into full windows with the
+    remainder trailing behind. Both cost the same number of passes, but an even
+    split never leaves a two-second sliver padded out with silence, which is
+    exactly the input Whisper invents dialogue for.
     """
     clips = []
-    start = 0.0
-    while start < duration:
-        clips.append({"start": start, "end": min(start + CHUNK_SECONDS, duration)})
-        start += CHUNK_SECONDS
+    for region in regions:
+        span = region["end"] - region["start"]
+        windows = max(1, ceil(span / CHUNK_SECONDS))
+        for window in range(windows):
+            clips.append(
+                {
+                    "start": region["start"] + span * window / windows,
+                    "end": region["start"] + span * (window + 1) / windows,
+                }
+            )
     return clips
+
+
+def plan_regions(audio, name, use_vad):
+    """Choose which stretches of a file to transcribe, or None for all of it.
+
+    The silence filter stops here rather than being handed to faster-whisper.
+    Its own filter concatenates the speech it keeps and maps the timestamps
+    back afterwards, so Whisper decodes windows stitched together from moments
+    minutes apart - which is what sends it into repeat loops and lets one cue
+    run on until the next burst of speech. Here the detector only says where to
+    point the model: the audio it hears is real and contiguous, and it picks up
+    again at the next speech by itself.
+    """
+    if not use_vad:
+        return None
+
+    duration = len(audio) / AUDIO_SAMPLE_RATE
+    regions = speech_regions(audio)
+    heard = sum(region["end"] - region["start"] for region in regions)
+    if heard < duration * VAD_MIN_KEEP_RATIO:
+        logging.warning(
+            "%s: the silence filter heard almost no speech, which means the "
+            "audio is mixed too quietly for the detector rather than that the "
+            "file is silent. Transcribing all of it instead.", name,
+        )
+        return None
+
+    widened = widen_regions(regions, duration)
+    covered = sum(region["end"] - region["start"] for region in widened)
+    skipped = duration - covered
+    if not widened or skipped <= 0:
+        return None
+
+    # One silence between each pair of regions, plus any at either end.
+    stretches = (
+        len(widened) - 1
+        + (widened[0]["start"] > 0)
+        + (widened[-1]["end"] < duration)
+    )
+    level = (
+        logging.WARNING
+        if skipped > duration * VAD_REMOVAL_WARN_RATIO
+        else logging.INFO
+    )
+    logging.log(
+        level,
+        "%s: skipping %s of %s, in %d stretch(es) with no speech in them. "
+        'Untick "Skip long silences" if those stretches should have had '
+        "subtitles.", name,
+        timedelta(seconds=int(skipped)),
+        timedelta(seconds=int(duration)),
+        stretches,
+    )
+    return widened
 
 
 def decode_audio(path, should_stop=None):
@@ -525,20 +657,20 @@ class SubtitleMakerApp:
         options = ttk.LabelFrame(self.root, text="Options")
         options.pack(pady=6, **pad)
 
-        # Off by default: the detector decides what Whisper is even allowed to
-        # see, and it is far more eager to discard audio than most people
-        # expect - see the note below.
+        # Off by default: skipping a stretch is still a judgement call made
+        # by a detector that cannot hear everything - see the note below.
         self.vad_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(
             options,
-            text="Filter silence before transcribing (faster)",
+            text="Skip long silences (faster on sparse audio)",
             variable=self.vad_var,
         ).pack(anchor="w", padx=8, pady=(6, 0))
         ttk.Label(
             options,
-            text="Only audio the detector hears as speech is transcribed. "
-                 "Quiet, sung, or heavily mixed speech is dropped, so long "
-                 "stretches can come out with no subtitles.",
+            text=f"Stretches with no speech for over {SILENCE_GAP_SECONDS:.0f} "
+                 "seconds are passed over; everything else is transcribed in "
+                 "place, pauses and all. Quiet speech under music can still be "
+                 "mistaken for silence and skipped.",
             foreground="gray",
             wraplength=520,
             justify="left",
@@ -946,23 +1078,23 @@ class SubtitleMakerApp:
         """Return a callable with a single signature for both pipelines."""
         task = "translate" if settings.translate else "transcribe"
 
+        # Both pipelines take the windows planned here instead of running
+        # their own silence filter, which would splice the surviving speech
+        # together before Whisper ever saw it.
         if settings.batched:
             pipeline = BatchedInferencePipeline(model=model)
 
-            def batched(audio):
-                # Without the VAD there is nothing to split the audio on, so
-                # supply plain fixed windows instead of letting the pipeline
-                # bail out.
-                clips = None
-                if not settings.vad_filter:
-                    clips = fixed_clip_timestamps(len(audio) / AUDIO_SAMPLE_RATE)
+            def batched(audio, name):
+                duration = len(audio) / AUDIO_SAMPLE_RATE
+                regions = plan_regions(audio, name, settings.vad_filter)
+                if regions is None:
+                    regions = [{"start": 0.0, "end": duration}]
 
                 return pipeline.transcribe(
                     audio,
                     language=settings.language,
                     task=task,
-                    vad_filter=settings.vad_filter,
-                    clip_timestamps=clips,
+                    clip_timestamps=split_clips(regions),
                     batch_size=BATCH_SIZE,
                     # Batched mode defaults to without_timestamps=True, which
                     # makes segment bounds come from merged chunks instead of
@@ -975,13 +1107,30 @@ class SubtitleMakerApp:
 
             return batched
 
-        return lambda audio: model.transcribe(
-            audio,
-            language=settings.language,
-            task=task,
-            vad_filter=settings.vad_filter,
-            condition_on_previous_text=False,
-        )
+        def sequential(audio, name):
+            regions = plan_regions(audio, name, settings.vad_filter)
+            return model.transcribe(
+                audio,
+                language=settings.language,
+                task=task,
+                # Flattened into start, end, start, end... in seconds. Regions
+                # are left whole here rather than cut into windows: within one
+                # the model advances to wherever the last segment ended, so it
+                # stops on a sentence instead of every thirty seconds. "0" is
+                # faster-whisper's own way of saying the entire file.
+                clip_timestamps=(
+                    [
+                        bound
+                        for region in regions
+                        for bound in (region["start"], region["end"])
+                    ]
+                    if regions
+                    else "0"
+                ),
+                condition_on_previous_text=False,
+            )
+
+        return sequential
 
     def _transcribe_one(self, transcribe, path, srt_path, index, total):
         name = os.path.basename(path)
@@ -1013,25 +1162,12 @@ class SubtitleMakerApp:
                 timedelta(seconds=int(container_duration)),
             )
 
-        segment_iter, info = transcribe(audio)
+        segment_iter, info = transcribe(audio, name)
         duration = info.duration or audio_duration
         logging.info(
             "Detected language for %s: %s (%.0f%% confidence)",
             name, info.language, (info.language_probability or 0) * 100,
         )
-
-        # duration_after_vad equals duration when the filter is off, so this
-        # only ever fires when the filter really did discard the audio.
-        removed = info.duration - info.duration_after_vad
-        if info.duration and removed > info.duration * VAD_REMOVAL_WARN_RATIO:
-            logging.warning(
-                "%s: the silence filter dropped %s of %s. Whatever it did not "
-                'hear as speech gets no subtitles - untick "Filter silence" if '
-                "whole stretches come out empty.",
-                name,
-                timedelta(seconds=int(removed)),
-                timedelta(seconds=int(info.duration)),
-            )
 
         segments = []
         for segment in segment_iter:
