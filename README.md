@@ -172,6 +172,7 @@ Cues are tidied on the way out:
 | Path | Purpose |
 | --- | --- |
 | `SubtitleMaker.py` | The whole application |
+| `test_SubtitleMaker.py` | Tests for the cue and hallucination rules |
 | `SubtitleMaker.bat` / `SubtitleMaker.sh` | Launchers |
 | `requirements.txt` | Pinned dependencies |
 | `error.log` | Rotating log, 1 MB × 3 (git-ignored) |
@@ -179,6 +180,20 @@ Cues are tidied on the way out:
 
 `error.log` records the full path and filename of every file processed. It is
 git-ignored for that reason — check before sharing it.
+
+## Tests
+
+```
+.venv/Scripts/python.exe -m unittest -v        # Windows
+.venv/bin/python -m unittest -v                # Linux, macOS
+```
+
+No model is loaded and nothing is downloaded, so the suite finishes in under a
+second. It covers what decides the contents of an `.srt`: how a cue is folded
+and timed, and which lines are thrown out for having been invented rather than
+heard. Those are all thresholds, and the awkward cases are real ones measured
+from transcripts — the tests say where each came from, because the numbers mean
+nothing without it.
 
 ## Troubleshooting
 
