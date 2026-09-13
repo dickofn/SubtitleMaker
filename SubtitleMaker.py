@@ -162,6 +162,10 @@ MAX_SUBTITLE_DURATION = 10.0
 # Length of a run of identical consecutive cues that counts as Whisper looping
 # rather than someone genuinely repeating themselves.
 REPEAT_RUN_MIN = 3
+# Neither invention test below judges a cue that ran for less than this. Both
+# read a cue's span as evidence, and a short cue has too little to give: real
+# speech is full of brief lines that look wrong by either measure.
+SUSPECT_MIN_SECONDS = 8.0
 # A hallucination over silence is a short phrase smeared across a long span:
 # Whisper fills the window with something plausible and stretches it to fit.
 # Measured over 579 cues from three files in two languages, every cue this slow
@@ -170,7 +174,13 @@ REPEAT_RUN_MIN = 3
 # 1.5. Spaces are not counted, so the rate means the same thing in Japanese as
 # in English.
 HALLUCINATION_MAX_RATE = 1.0
-HALLUCINATION_MIN_SECONDS = 8.0
+# The other kind: Whisper latches onto a unit and repeats it until the window
+# is full. Over the same 579 cues, everything at or above this share was a loop
+# and nothing real came close once the length gate had its say - the most
+# repetitive genuine line scored 0.85 and lasted four seconds.
+LOOP_MIN_REPETITION = 0.9
+# Below this many characters a repetition score means nothing either way.
+LOOP_MIN_CHARS = 8
 # The silence filter only cuts a stretch out when the detector hears nothing
 # for this long. Shorter pauses stay in, so a line keeps the rhythm around it
 # instead of being spliced against a moment from minutes away.
@@ -554,15 +564,46 @@ def is_stretched(content, seconds):
     window carries the whole window's worth. Real speech keeps up a rate even
     when the cue runs long; an invented one cannot.
     """
-    if seconds < HALLUCINATION_MIN_SECONDS:
+    if seconds < SUSPECT_MIN_SECONDS:
         return False
     return len("".join(content.split())) / seconds < HALLUCINATION_MAX_RATE
+
+
+def repetition(content):
+    """What share of a line is one short unit repeated back to back, 0 to 1.
+
+    Comparing the line against itself shifted by every plausible unit length
+    finds a loop without knowing anything about the language: text that is one
+    thing over and over matches itself at some shift nearly everywhere, and
+    ordinary speech does not come close.
+    """
+    letters = "".join(content.split())
+    if len(letters) < LOOP_MIN_CHARS:
+        return 0.0
+    # A unit has to fit at least three times over to count as repetition.
+    return max(
+        sum(a == b for a, b in zip(letters, letters[unit:])) / (len(letters) - unit)
+        for unit in range(1, len(letters) // 3 + 1)
+    )
+
+
+def is_looping(content, seconds):
+    """Has Whisper latched onto a phrase and filled the window with it?
+
+    Real speech repeats too - a word said three times in a row scores a flat
+    1.0 - so length is what separates the two. Saying a word three times over
+    takes a second or two. A loop runs to the end of the window, however long
+    that is.
+    """
+    if seconds < SUSPECT_MIN_SECONDS:
+        return False
+    return repetition(content) >= LOOP_MIN_REPETITION
 
 
 def build_subtitles(segments):
     """Convert Whisper segments to srt.Subtitle, dropping empty ones."""
     subtitles = []
-    invented = 0
+    stretched = looping = 0
     for segment in segments:
         content = segment.text.strip()
         if not content:
@@ -570,13 +611,16 @@ def build_subtitles(segments):
 
         start = timedelta(seconds=segment.start)
         end = timedelta(seconds=segment.end)
+        # Both tests read the span, so both come before the clamp below, which
+        # would destroy the evidence.
         span = (end - start).total_seconds()
         if is_stretched(content, span):
-            # Judged before the clamp below, which would destroy the evidence.
-            logging.debug(
-                "Dropping %.0fs of silence written up as %r", span, content
-            )
-            invented += 1
+            logging.debug("Dropping %.0fs of silence written up as %r", span, content)
+            stretched += 1
+            continue
+        if is_looping(content, span):
+            logging.debug("Dropping %.0fs of %r on a loop", span, content)
+            looping += 1
             continue
 
         # A short line isolated in a long silence can still stretch for minutes.
@@ -588,10 +632,18 @@ def build_subtitles(segments):
             srt.Subtitle(index=0, start=start, end=end, content=content)
         )
 
-    if invented:
+    if stretched or looping:
+        counted = [
+            f"{count} {reason}"
+            for count, reason in (
+                (stretched, "stretched over silence"),
+                (looping, "repeated until the window was full"),
+            )
+            if count
+        ]
         logging.info(
-            "Dropped %d line(s) Whisper stretched over silence rather than "
-            "heard; run with debug logging to see them.", invented,
+            "Dropped %s - lines Whisper invented rather than heard; run with "
+            "debug logging to see them.", " and ".join(counted),
         )
     subtitles = drop_repeat_runs(subtitles)
 
@@ -1198,6 +1250,7 @@ class SubtitleMakerApp:
                 timedelta(seconds=int(container_duration)),
             )
 
+        self.post(self.set_status, f"[{index + 1}/{total}] Transcribing: {label}")
         segment_iter, info = transcribe(audio, name)
         duration = info.duration or audio_duration
         logging.info(

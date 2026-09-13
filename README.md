@@ -177,14 +177,15 @@ or `int8` precision.
 **Subtitles stop partway through, or whole stretches are empty** — "Skip long
 silences" is the usual cause. The detector is stricter than it sounds: on
 material where speech is quiet, sung, or buried under music it can hear
-speech in a tenth of a file, and the rest is passed over. The log says how much
-was skipped, and warns when that is more than 60% of a file. Turn the option
+speech in a tenth of a file, and the rest is passed over. The log says how
+much was skipped, and warns when that is more than 60% of a file. Turn the option
 off and re-run. If it hears almost nothing at all it stands down by itself and
 transcribes the whole file, with a warning saying so.
 
-**Repeated or nonsense lines over quiet passages** — a known Whisper failure
-mode on silence, not a decoding bug. Two kinds are removed automatically, with
-no option to turn off and nothing lost when there is nothing to remove:
+**Repeated or nonsense lines, or one line repeated until it fills the screen**
+— a known Whisper failure mode on silence, not a decoding bug. Three kinds are
+removed automatically, with no option to turn off and nothing lost when there
+is nothing to remove:
 
 - A line smeared over a long span - "Thank you for watching." held for the
   whole thirty seconds, or its Japanese equivalent - is Whisper filling a
@@ -192,7 +193,14 @@ no option to turn off and nothing lost when there is nothing to remove:
   one character a second is dropped. Over 579 cues from three files in two
   languages that caught 18 invented lines and no real ones; the slowest
   genuine line ran at 1.5 characters a second.
+- A line that is one short unit repeated to the end of the window - the same
+  syllable or phrase over and over - is Whisper stuck in a loop. A cue of
+  eight seconds or more that is 90% one repeated unit is dropped. That caught
+  11 more over the same 579 cues. Length is what makes this safe: real speech
+  repeats too, and a word said three times in a row scores just as high, but
+  it lasts under two seconds and is kept.
 - Runs of three or more identical consecutive lines are collapsed to one.
 
-The log says how many of each were dropped. Neither depends on "Skip long
-silences", so you get them with the filter off.
+The log says how many of each were dropped, and debug logging prints them.
+None of the three depends on "Skip long silences", so you get them with the
+filter off.
