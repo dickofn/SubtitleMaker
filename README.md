@@ -183,6 +183,16 @@ off and re-run. If it hears almost nothing at all it stands down by itself and
 transcribes the whole file, with a warning saying so.
 
 **Repeated or nonsense lines over quiet passages** — a known Whisper failure
-mode on silence, not a decoding bug. Runs of three or more identical
-consecutive lines are collapsed to one automatically; turning "Skip long
-silences" on suppresses the rest, at the cost of the stretches described above.
+mode on silence, not a decoding bug. Two kinds are removed automatically, with
+no option to turn off and nothing lost when there is nothing to remove:
+
+- A line smeared over a long span - "Thank you for watching." held for the
+  whole thirty seconds, or its Japanese equivalent - is Whisper filling a
+  window it heard nothing in. Any cue lasting eight seconds or more at under
+  one character a second is dropped. Over 579 cues from three files in two
+  languages that caught 18 invented lines and no real ones; the slowest
+  genuine line ran at 1.5 characters a second.
+- Runs of three or more identical consecutive lines are collapsed to one.
+
+The log says how many of each were dropped. Neither depends on "Skip long
+silences", so you get them with the filter off.

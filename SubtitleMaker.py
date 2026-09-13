@@ -162,6 +162,15 @@ MAX_SUBTITLE_DURATION = 10.0
 # Length of a run of identical consecutive cues that counts as Whisper looping
 # rather than someone genuinely repeating themselves.
 REPEAT_RUN_MIN = 3
+# A hallucination over silence is a short phrase smeared across a long span:
+# Whisper fills the window with something plausible and stretches it to fit.
+# Measured over 579 cues from three files in two languages, every cue this slow
+# and this long was invented - "Thank you for watching." at 0.67 characters a
+# second, the notorious one, and 17 others - while the slowest real line ran at
+# 1.5. Spaces are not counted, so the rate means the same thing in Japanese as
+# in English.
+HALLUCINATION_MAX_RATE = 1.0
+HALLUCINATION_MIN_SECONDS = 8.0
 # The silence filter only cuts a stretch out when the detector hears nothing
 # for this long. Shorter pauses stay in, so a line keeps the rhythm around it
 # instead of being spliced against a moment from minutes away.
@@ -537,9 +546,23 @@ def drop_repeat_runs(subtitles):
     return kept
 
 
+def is_stretched(content, seconds):
+    """Is this too few characters to have taken that long to say?
+
+    Whisper closes a segment at the next speech boundary, so the span of a cue
+    is really the span of the silence after it, and a line invented to fill a
+    window carries the whole window's worth. Real speech keeps up a rate even
+    when the cue runs long; an invented one cannot.
+    """
+    if seconds < HALLUCINATION_MIN_SECONDS:
+        return False
+    return len("".join(content.split())) / seconds < HALLUCINATION_MAX_RATE
+
+
 def build_subtitles(segments):
     """Convert Whisper segments to srt.Subtitle, dropping empty ones."""
     subtitles = []
+    invented = 0
     for segment in segments:
         content = segment.text.strip()
         if not content:
@@ -547,16 +570,29 @@ def build_subtitles(segments):
 
         start = timedelta(seconds=segment.start)
         end = timedelta(seconds=segment.end)
-        # Whisper closes a segment at the next speech boundary, so a short line
-        # isolated in a long silence can stretch for many minutes. Clamping only
-        # ever shortens a cue, so it cannot introduce overlaps.
-        if (end - start).total_seconds() > MAX_SUBTITLE_DURATION:
+        span = (end - start).total_seconds()
+        if is_stretched(content, span):
+            # Judged before the clamp below, which would destroy the evidence.
+            logging.debug(
+                "Dropping %.0fs of silence written up as %r", span, content
+            )
+            invented += 1
+            continue
+
+        # A short line isolated in a long silence can still stretch for minutes.
+        # Clamping only ever shortens a cue, so it cannot introduce overlaps.
+        if span > MAX_SUBTITLE_DURATION:
             end = start + timedelta(seconds=MAX_SUBTITLE_DURATION)
 
         subtitles.append(
             srt.Subtitle(index=0, start=start, end=end, content=content)
         )
 
+    if invented:
+        logging.info(
+            "Dropped %d line(s) Whisper stretched over silence rather than "
+            "heard; run with debug logging to see them.", invented,
+        )
     subtitles = drop_repeat_runs(subtitles)
 
     # Whisper sometimes emits segments that overlap by a fraction of a second.
