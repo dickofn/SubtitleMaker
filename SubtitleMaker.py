@@ -973,23 +973,33 @@ def build_subtitles(segments):
             )
     subtitles = drop_repeat_runs(subtitles)
 
-    # One pass for timing. Whisper both overlaps cues by a fraction of a second
-    # and closes some of them almost immediately, so every cue is pulled back
-    # off the next one and then given as much of the gap after it as it needs
-    # to be readable. Both only ever move an end, never a start, so the cues
-    # stay in order.
+    # One pass for timing, sweeping forward. Whisper both overlaps cues by a
+    # fraction of a second and closes some of them almost immediately, so every
+    # cue is pulled back off the next one and then given as much of the gap
+    # after it as it needs to be readable.
+    sliver = timedelta(milliseconds=1)
     for position, subtitle in enumerate(subtitles):
+        # Whisper can also stamp a run of segments with one instant and no
+        # duration between them - measured on one 149-minute film, 23 segments
+        # had no duration and 20 shared a start with the segment before. They
+        # cannot all be shown at that instant, and giving each a sliver where
+        # it stands puts every one of them on top of the next. Laying them out
+        # one after another instead costs a millisecond apiece and keeps the
+        # promise that no subtitle outlives the start of the next.
+        if position and subtitle.start < subtitles[position - 1].end:
+            subtitle.start = subtitles[position - 1].end
         following = subtitles[position + 1] if position + 1 < len(subtitles) else None
         needed = readable_duration(subtitle.content)
         ceiling = following.start if following else subtitle.end + needed
+        # Never behind where this cue now starts: every cue gets some duration,
+        # even where that leaves it only the sliver.
+        ceiling = max(ceiling, subtitle.start + sliver)
         if subtitle.end > ceiling:
             subtitle.end = ceiling
         if subtitle.end - subtitle.start < needed:
             subtitle.end = min(ceiling, subtitle.start + needed)
-        # A cue the next one starts on top of keeps a sliver, so it stays valid
-        # srt rather than becoming a zero-length or reversed entry.
         if subtitle.end <= subtitle.start:
-            subtitle.end = subtitle.start + timedelta(milliseconds=1)
+            subtitle.end = subtitle.start + sliver
 
     # Numbered only now, so dropped repeats leave no gaps in the sequence.
     for position, subtitle in enumerate(subtitles, start=1):

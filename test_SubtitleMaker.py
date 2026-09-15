@@ -280,6 +280,38 @@ class BuildSubtitles(unittest.TestCase):
             for earlier, later in zip(subs, subs[1:]):
                 self.assertLessEqual(earlier.end, later.start)
 
+    def test_a_run_stamped_with_one_instant_is_laid_out_in_order(self):
+        """Whisper can emit several segments at one time with no duration.
+
+        Measured on one 149-minute film: 23 segments had no duration and 20
+        shared a start with the one before, arriving in runs. Giving each a
+        millisecond where it stands puts every one of them on top of the next,
+        which is how a file that promises no overlaps came to have ten.
+        """
+        segments = [Segment(42.0, 42.0, f"line {n}") for n in range(8)]
+        segments.append(Segment(60.0, 61.0, "after the run"))
+        subs = sm.build_subtitles(segments)
+
+        self.assertEqual(len(subs), len(segments))
+        for earlier, later in zip(subs, subs[1:]):
+            self.assertLessEqual(earlier.end, later.start)
+        for cue in subs:
+            self.assertGreater(cue.end, cue.start)
+        # Every one of them still starts where it was stamped, give or take
+        # the milliseconds it took to lay them out, and the run stays inside
+        # the gap before the next real cue - the last of them is the only one
+        # with room to claim a readable second, and it takes it from that gap.
+        for cue in subs[:8]:
+            self.assertLess(cue.start.total_seconds() - 42.0, 0.05)
+        self.assertLessEqual(subs[7].end, subs[8].start)
+
+    def test_a_cue_starting_before_the_one_before_it_is_moved_after(self):
+        subs = sm.build_subtitles([Segment(10.0, 12.0, "first"),
+                                   Segment(9.0, 11.0, "stamped earlier")])
+        self.assertEqual(len(subs), 2)
+        self.assertLessEqual(subs[0].end, subs[1].start)
+        self.assertGreater(subs[1].end, subs[1].start)
+
     def test_output_survives_a_real_srt_parser(self):
         subs = sm.build_subtitles([
             Segment(0.0, 0.2, "flash"),
