@@ -43,8 +43,8 @@ CONFIG_PATH = os.path.join(APP_DIR, "settings.json")
 # against a feature film and measured, and two that were are deliberately
 # absent. See "Models that are not offered" in the README.
 MODELS = (
-    "large-v3",
     "large-v3-turbo",
+    "large-v3",
     "large-v2",
     "large-v1",
     "medium",
@@ -61,7 +61,16 @@ MODELS = (
     "distil-medium.en",
     "distil-small.en",
 )
-DEFAULT_MODEL = "large-v3"
+# Measured against the published English subtitles of two feature films,
+# 146 and 149 minutes: turbo transcribed faster than large-v3 (74x and 63x
+# against 49x and 48x), agreed with the reference more closely (0.148 and
+# 0.233 against 0.176 and 0.264), and placed its cues better (62% of reference
+# onsets matched within half a second against 52% and 57%). It leads on every
+# one of those on both films, which is why it is what opens.
+DEFAULT_MODEL = "large-v3-turbo"
+# Turbo was never trained to translate, so a translation cannot start from it.
+# This is what the warning offers instead.
+DEFAULT_TRANSLATION_MODEL = "large-v3"
 
 # Named models whose capability cannot be read off the name. Everything else
 # is recognised by its suffix or prefix below. These two are not offered in
@@ -1414,13 +1423,13 @@ class SubtitleMakerApp:
 
         switch = messagebox.askyesno(
             "Model cannot translate",
-            f"{detail}\n\nSwitch to '{DEFAULT_MODEL}'?\n\n"
+            f"{detail}\n\nSwitch to '{DEFAULT_TRANSLATION_MODEL}'?\n\n"
             f"Yes - switch and continue\nNo - continue with '{model_size}'",
         )
         if switch:
             logging.info("Switching from %s to %s for translation.",
-                         model_size, DEFAULT_MODEL)
-            self.model_var.set(DEFAULT_MODEL)
+                         model_size, DEFAULT_TRANSLATION_MODEL)
+            self.model_var.set(DEFAULT_TRANSLATION_MODEL)
             self._update_model_note()
         return True
 

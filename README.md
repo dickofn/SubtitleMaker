@@ -106,8 +106,8 @@ The first run of any model downloads it from Hugging Face and caches it.
 
 | Model | Capability |
 | --- | --- |
-| `large-v3` (default), `large-v2`, `large-v1`, `medium`, `small`, `base`, `tiny` | Multilingual — transcribe or translate to English |
-| `large-v3-turbo` | Multilingual transcription, but never trained to translate |
+| `large-v3`, `large-v2`, `large-v1`, `medium`, `small`, `base`, `tiny` | Multilingual — transcribe or translate to English |
+| `large-v3-turbo` (default) | Multilingual transcription, but never trained to translate |
 | `medium.en`, `small.en`, `base.en`, `tiny.en` | English audio only |
 | `distil-large-v3.5`, `distil-large-v3`, `distil-large-v2`, `distil-medium.en`, `distil-small.en` | English audio only — faster than the sizes they are distilled from |
 
@@ -118,28 +118,55 @@ list nor recognisable from it is left alone rather than guessed at.
 
 #### Which one to pick
 
-Measured on one 146-minute film against its published English subtitle, every
-model through the same cue rules. The error rate is computed over time
-windows, so a model that puts the right words at the wrong moment is charged
-twice for it — once where the word is missing and once where it reappears.
-Widening the window forgives displacement but not a wrong word, which is what
-separates the two columns:
+Measured against the published English subtitles of two feature films, 146 and
+149 minutes, every model through the same cue rules. The error rate is
+computed over time windows, so a model that puts the right words at the wrong
+moment is charged twice — once where the word is missing and once where it
+reappears. Widening the window to fifteen minutes forgives displacement but
+not a wrong word, which is what separates the two error columns.
 
-| Model | Speed | Placed | Transcript | Cue onsets within 0.5s |
+| Model | Speed | Placed | Transcript | Onsets within 0.5s |
 | --- | --- | --- | --- | --- |
-| `large-v3-turbo` | 74× | 0.148 | 0.126 | 61.7% |
-| `medium.en` | 60× | 0.187 | 0.158 | 61.4% |
-| `large-v3` | 49× | 0.176 | 0.136 | 51.5% |
-| `distil-large-v3.5` | 70× | 0.405 | 0.117 | 25.6% |
+| `large-v3-turbo` | 74× / 63× | **0.148 / 0.233** | 0.126 / 0.208 | **61.7% / 62.2%** |
+| `large-v3` | 49× / 48× | 0.176 / 0.264 | 0.136 / 0.241 | 51.5% / 57.0% |
+| `distil-large-v3.5` | 70× / 58× | 0.405 / 0.369 | **0.117 / 0.189** | 25.6% / 32.1% |
+| `medium.en` | 60× / — | 0.187 / — | 0.158 / — | 61.4% / — |
 
-`large-v3-turbo` was the best of these for subtitles and the fastest, at the
-cost of the translate task it was never trained for. `distil-large-v3.5` heard
-the most words of any of them and placed them worst by a wide margin — its cue
-onsets scatter across 1.6 seconds against turbo's 0.5 — which matters here
-because every cue boundary is now cut from word timings. The default stays
-`large-v3`, which can translate.
+`large-v3-turbo` leads on speed, on placement and on cue onsets on both films,
+which is why it is what opens.
 
-Those figures come from one film. They are worth what one film is worth.
+`distil-large-v3.5` heard more words than anything else on both films and
+placed them worst by a wide margin. Its cue onsets scatter across 1.6 seconds
+against turbo's 0.5, and that is scatter rather than a constant lag, so no
+offset corrects it. It is the wrong choice here specifically because every cue
+boundary is now cut from word timings.
+
+#### Translating Japanese
+
+Whisper's translate task only ever outputs English, and `large-v3-turbo` was
+never trained on it, so a translation has to start somewhere else — the app
+warns and offers `large-v3`.
+
+Measured on a 125-minute Japanese film against its published English subtitle,
+which is a human translation of the same dialogue:
+
+| Model | Speed | chrF | Onsets within 0.5s | Words |
+| --- | --- | --- | --- | --- |
+| `large-v2` | 39× | 0.456 | 71.6% | 8,063 |
+| `large-v3` | 40× | 0.426 | 57.1% | 7,455 |
+
+Word error rate is the wrong tool for a translation — two good translations of
+one line share meaning and almost no exact wording, and both of these score
+about 0.98 against the reference, which says nothing. chrF is what machine
+translation is normally judged by; it forgives rewording and still punishes
+content that is not there. It is scored here in 30-second windows, because
+scored across a whole film it mostly reports that both texts are English: an
+*unrelated* English film reaches 0.660 that way, against 0.203 windowed. The
+same model transcribing rather than translating scores 0.010, which is the
+check that the measure discriminates at all.
+
+Neither number means anything on its own. A translation that agrees with
+another translation at 0.456 may be perfectly good.
 
 #### Models that are not offered
 

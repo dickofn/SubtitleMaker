@@ -689,10 +689,24 @@ class ModelCapability(unittest.TestCase):
         for name in sm.MODELS:
             self.assertNotIn("/", name, name)
 
-    def test_only_a_model_that_can_translate_is_offered_by_default(self):
-        """The dropdown's default must never be the one that warns."""
-        self.assertIn(sm.model_capability(sm.DEFAULT_MODEL),
+    def test_the_translation_default_can_actually_translate(self):
+        """The warning offers a way out, so the way out has to be one.
+
+        The model that opens is the best measured transcriber, and it was
+        never trained to translate - so the two defaults are separate, and it
+        is this one the warning switches to.
+        """
+        self.assertIn(sm.model_capability(sm.DEFAULT_TRANSLATION_MODEL),
                       sm.CAN_BE_ASKED_TO_TRANSLATE)
+        self.assertIn(sm.DEFAULT_TRANSLATION_MODEL, sm.MODELS)
+
+    def test_the_model_that_opens_is_offered(self):
+        self.assertIn(sm.DEFAULT_MODEL, sm.MODELS)
+        self.assertEqual(sm.MODELS[0], sm.DEFAULT_MODEL)
+
+    def test_the_two_defaults_are_not_the_same_model(self):
+        """If they were, one of the two measurements is being ignored."""
+        self.assertNotEqual(sm.DEFAULT_MODEL, sm.DEFAULT_TRANSLATION_MODEL)
 
 
 if __name__ == "__main__":
