@@ -18,8 +18,12 @@ Runs on Windows, Linux, and macOS.
 - **Drops what Whisper invents over silence** — the stock "Thank you for
   watching." held for thirty seconds, and lines it repeats until the screen
   is full.
-- **Readable cues** — folded to subtitle width, never left on screen too
-  briefly to read, never overlapping.
+- **Cues cut on the words, not on the segment** — Whisper returns whatever it
+  closed a window on, which is often a whole sentence. Word timings say where
+  the pauses and the full stops were, so a long one is divided between cues
+  that each begin and end on real speech.
+- **Readable cues** — folded to subtitle width, never more lines than a frame
+  should carry, never on screen too briefly to read, never overlapping.
 - **GPU or CPU** — CUDA when available, with automatic fallback to a compute
   type the hardware actually supports.
 - **Survives corrupt media** — packets are demuxed and decoded one at a time,
@@ -102,9 +106,17 @@ The first run of any model downloads it from Hugging Face and caches it.
 
 | Model | Capability |
 | --- | --- |
-| `large-v3` (default), `large-v2`, `medium`, `small`, `base`, `tiny` | Multilingual — transcribe or translate to English |
+| `large-v3` (default), `large-v2`, `large-v1`, `medium`, `small`, `base`, `tiny` | Multilingual — transcribe or translate to English |
 | `large-v3-turbo` | Multilingual transcription, but never trained to translate |
-| `distil-large-v3.5` | English audio only |
+| `medium.en`, `small.en`, `base.en`, `tiny.en` | English audio only |
+| `distil-large-v3.5`, `distil-large-v3`, `distil-large-v2`, `distil-medium.en`, `distil-small.en` | English audio only — faster than the sizes they are distilled from |
+| `kotoba-tech/kotoba-whisper-v2.0-faster` | Japanese audio only, and not trained to translate |
+| `nyrahealth/faster_CrisperWhisper` | English audio only — transcribes verbatim, disfluencies included |
+
+The box is editable: anything else that CTranslate2 can load works too, either
+a Hugging Face repository id or the path to a folder holding a converted
+model. Capability is read off the name, so a model that is neither on this
+list nor recognisable from it is left alone rather than guessed at.
 
 The app shows the selected model's capability underneath the dropdown and warns
 before starting if the choice conflicts with the requested task.
@@ -155,17 +167,31 @@ Each subtitle file is written beside its source: `video.mp4` produces
 
 Cues are tidied on the way out:
 
-- **Folded to width.** Whisper returns a sentence as one long run. Lines are
-  balanced onto as few lines as will hold them at 42 columns, counting East
-  Asian characters as the two columns they are drawn in, so Japanese folds at
-  21 characters rather than running off the side of the frame.
+- **Divided where the speech divides.** A segment too wide or too long to be
+  one cue is split between several, cut at a pause or a full stop where there
+  is one near the even division and at the even division where there is not.
+  Each piece is timed from its own first and last word.
+- **Folded to width.** Lines are balanced onto as few lines as will hold them
+  at 42 columns, counting East Asian characters as the two columns they are
+  drawn in, so Japanese folds at 21 characters rather than running off the
+  side of the frame. A cue is never allowed more than two lines; a third is
+  what splitting exists to avoid.
 - **Long enough to read.** A cue Whisper closes almost as soon as it opens is
-  given up to a second, taken from the gap after it and never from the next
-  cue.
-- **Never overlapping.** No subtitle outlives the start of the next, and any
-  segment left open by Whisper is capped at 10 seconds.
+  given at least a second, and a denser one as long as its width takes to read
+  at 20 columns a second. Both come out of the gap after the cue and never out
+  of the next one, so neither is guaranteed when speech is continuous.
+- **Never overlapping.** No subtitle outlives the start of the next, and a
+  segment with no usable word timings is capped at 10 seconds.
 - **Nothing invented.** See [Troubleshooting](#troubleshooting) for the three
   kinds of made-up line that are removed automatically.
+
+On a 196-second sample of continuous synthesized speech read by `large-v3`,
+cutting on words rather than on segments took the cues that needed three or
+more lines from 6 of 11 to 0 of 20 — six lines at worst before, two after —
+and removed both cases where the 10-second cap had taken a line off the screen
+while its own words were still being spoken. The transcript is untouched by
+any of it: 185 words either way. Asking for word timings cost 2% of
+transcription time on that run (median of five, batched, CUDA, `float16`).
 
 ## Files
 
@@ -189,9 +215,9 @@ git-ignored for that reason — check before sharing it.
 ```
 
 No model is loaded and nothing is downloaded, so the suite finishes in under a
-second. It covers what decides the contents of an `.srt`: how a cue is folded
-and timed, and which lines are thrown out for having been invented rather than
-heard. Those are all thresholds, and the awkward cases are real ones measured
+second. It covers what decides the contents of an `.srt`: how a cue is cut,
+folded and timed, which lines are thrown out for having been invented rather
+than heard, and what each model can be asked to do. Those are all thresholds, and the awkward cases are real ones measured
 from transcripts — the tests say where each came from, because the numbers mean
 nothing without it.
 
@@ -250,6 +276,14 @@ is nothing to remove:
   one character a second is dropped. Over 579 cues from three files in two
   languages that caught 18 invented lines and no real ones; the slowest
   genuine line ran at 1.5 characters a second.
+
+  The eight-second gate is also what lets a shorter invention through, so
+  Whisper's own reading of the window is used to lower it. Where it reports
+  that nothing was said there, three seconds is enough. That reading is never
+  a reason to drop a line by itself — it belongs to the whole window rather
+  than to one cue, and a line still has to fail the rate test above to go —
+  and the log says how many were caught only because of it, so the threshold
+  can be judged against a real run.
 - A line that is one short unit repeated to the end of the window - the same
   syllable or phrase over and over - is Whisper stuck in a loop. A cue of
   eight seconds or more that is 90% one repeated unit is dropped. That caught

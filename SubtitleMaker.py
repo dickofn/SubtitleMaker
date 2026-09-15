@@ -37,37 +37,76 @@ APP_DIR = os.path.dirname(os.path.abspath(__file__))
 LOG_PATH = os.path.join(APP_DIR, "error.log")
 CONFIG_PATH = os.path.join(APP_DIR, "settings.json")
 
+# Every size faster-whisper knows by name, plus two conversions from Hugging
+# Face that cover cases the stock weights handle poorly. The dropdown is
+# editable, so any other CTranslate2 repository id or local directory can be
+# typed into it instead of picked from this list.
 MODELS = (
     "large-v3",
-    "large-v2",
     "large-v3-turbo",
+    "large-v2",
+    "large-v1",
     "medium",
     "small",
     "base",
     "tiny",
+    "medium.en",
+    "small.en",
+    "base.en",
+    "tiny.en",
     "distil-large-v3.5",
+    "distil-large-v3",
+    "distil-large-v2",
+    "distil-medium.en",
+    "distil-small.en",
+    "kotoba-tech/kotoba-whisper-v2.0-faster",
+    "nyrahealth/faster_CrisperWhisper",
 )
 DEFAULT_MODEL = "large-v3"
 
-# Trained on English audio only - useless for anything else.
-ENGLISH_ONLY_MODELS = {"distil-large-v3.5"}
-# Multilingual for transcription, but never trained on the translate task.
-# OpenAI: "the turbo model will return the original language even if
-# --task translate is specified." https://github.com/openai/whisper#available-models
-NO_TRANSLATION_MODELS = {"large-v3-turbo", "turbo"} | ENGLISH_ONLY_MODELS
+# Named models whose capability cannot be read off the name. Everything else
+# is recognised by its suffix or prefix below.
+ENGLISH_ONLY_MODELS = {"nyrahealth/faster_CrisperWhisper"}
+JAPANESE_ONLY_MODELS = {"kotoba-tech/kotoba-whisper-v2.0-faster"}
+# Capabilities that may be asked for a translation without the request being
+# quietly ignored. A custom model is included because nothing here knows what
+# it was trained for - the warning would be a guess.
+CAN_BE_ASKED_TO_TRANSLATE = {"full", "custom"}
 
 MODEL_NOTES = {
     "english_only": "English audio only - cannot handle Japanese or other languages.",
+    "japanese_only": "Japanese audio only, and not trained to translate.",
     "no_translation": "Multilingual transcription, but not trained to translate.",
+    "custom": "Custom model - whichever languages and tasks it was trained for.",
     "full": "Multilingual. Can transcribe or translate to English.",
 }
 
 
 def model_capability(model_size):
-    if model_size in ENGLISH_ONLY_MODELS:
+    """What a model can be asked to do, read off its name.
+
+    The suffix and prefix rules cover the whole stock list: ".en" weights were
+    trained on English audio alone, every distil-whisper release is
+    English-only whatever its size, and the turbo weights skipped the
+    translation task entirely. A name that matches none of them and looks like
+    a repository id or a path is somebody else's model, and nothing here can
+    say what it does.
+    """
+    name = model_size.strip()
+    lowered = name.lower()
+    if name in JAPANESE_ONLY_MODELS or "kotoba" in lowered:
+        return "japanese_only"
+    if (name in ENGLISH_ONLY_MODELS
+            or lowered.endswith(".en")
+            or lowered.startswith("distil-")):
         return "english_only"
-    if model_size in NO_TRANSLATION_MODELS:
+    # OpenAI: "the turbo model will return the original language even if
+    # --task translate is specified."
+    # https://github.com/openai/whisper#available-models
+    if "turbo" in lowered:
         return "no_translation"
+    if "/" in name or os.sep in name:
+        return "custom"
     return "full"
 
 # Label -> (ctranslate2 device, default compute type for that device)
@@ -164,10 +203,42 @@ MAX_SUBTITLE_DURATION = 10.0
 # quarter-second flash is unreadable however correct it is. A cue is only
 # stretched into the gap that follows it, never over the next line.
 MIN_SUBTITLE_DURATION = 1.0
+# And a cue carrying more than a moment's reading is held for at least as
+# long as it takes to read, in columns a second. Like the minimum above, this
+# is only ever satisfied out of the gap after a cue, so it reaches a line that
+# ends before a pause and cannot reach one in the middle of continuous speech
+# - there is no time there to give it. Counting columns rather than characters
+# makes one number serve both scripts, East Asian text being read at about
+# half the character rate and drawn at twice the width. Broadcast guidance
+# sits between 15 and 20.
+MAX_READING_RATE = 20.0
 # Columns a subtitle line may occupy before it is folded, counting East Asian
 # characters as the two columns they are drawn in. 42 is the usual broadcast
 # figure and about what a player will show without shrinking the text.
 SUBTITLE_LINE_COLUMNS = 42
+# Lines a single cue may occupy. Two is the broadcast convention; a third
+# starts covering the picture and outruns the time the cue is on screen for.
+SUBTITLE_MAX_LINES = 2
+# What those lines hold if nothing is wasted at the end of them, which is
+# only ever used to estimate how many cues a segment needs. Words do not
+# divide evenly into lines, so a cue this wide can still fold onto one line
+# too many; what a cue may actually hold is settled by folding it and
+# counting, in overflows() below.
+CUE_MAX_COLUMNS = SUBTITLE_LINE_COLUMNS * SUBTITLE_MAX_LINES
+# A gap this long between two words is somewhere the speaker stopped, and so
+# somewhere a cue may end without cutting a phrase in half. Measured against
+# ordinary delivery, a shorter gap than this is just the space between words.
+CUE_BREAK_PAUSE = 0.35
+# Punctuation that closes a thought, and so also ends a cue well. The clause
+# marks are a weaker signal than the sentence ones but still beat cutting at
+# whatever word happens to reach the column limit.
+SENTENCE_END = frozenset(".。．!！?？…")
+CLAUSE_END = frozenset(",、，;；:：")
+# How short of its even share a cue may be cut when a pause or a full stop
+# offers itself there. A break one word early at a full stop reads better than
+# a break at the column limit; a break at the first comma in a long sentence
+# does not, because it leaves the rest with everything still to carry.
+NATURAL_BREAK_SHARE = 0.5
 # Punctuation that may never be left stranded at the start of a folded line.
 NEVER_STARTS_A_LINE = frozenset("、。，．！？・）」』］｝,.!?)]}")
 # Length of a run of identical consecutive cues that counts as Whisper looping
@@ -192,6 +263,18 @@ HALLUCINATION_MAX_RATE = 1.0
 LOOP_MIN_REPETITION = 0.9
 # Below this many characters a repetition score means nothing either way.
 LOOP_MIN_CHARS = 8
+# Whisper reports, for each window it decodes, how sure it is that nothing was
+# said in it. A window it calls silent still comes back with text whenever the
+# decoder had to produce something, and that text was invented. The figure is
+# too coarse to act on alone - it belongs to the whole window rather than to
+# one cue - so it is never a reason to drop a line by itself. It only lowers
+# the bar the test below already applies, which is what makes it safe: two
+# independent signals have to agree before anything is thrown away.
+NO_SPEECH_SUSPECT = 0.6
+# With that agreement a stretched line does not have to run the full eight
+# seconds to be recognisable, which is the whole point - the eight-second gate
+# is what lets shorter inventions through.
+SUSPECT_MIN_SECONDS_UNHEARD = 3.0
 # Windows of speech sampled to identify the language, spread evenly across a
 # file. Whisper reads the language off the start of whatever it is handed, and
 # the start of a file is very often music, a logo sting or silence - which is
@@ -540,15 +623,23 @@ def drop_repeat_runs(subtitles):
     return kept
 
 
-def is_stretched(content, seconds):
+def is_stretched(content, seconds, no_speech_prob=0.0):
     """Is this too few characters to have taken that long to say?
 
     Whisper closes a segment at the next speech boundary, so the span of a cue
     is really the span of the silence after it, and a line invented to fill a
     window carries the whole window's worth. Real speech keeps up a rate even
     when the cue runs long; an invented one cannot.
+
+    The length gate is what stops the rate test judging the brief lines real
+    speech is full of, and it is also what lets a shorter invention through.
+    Whisper's own reading of the window - how sure it was that nothing was
+    said there - lowers that gate when it agrees. It never raises it and it is
+    never enough on its own, so a line still has to fail the rate test to go.
     """
-    if seconds < SUSPECT_MIN_SECONDS:
+    floor = (SUSPECT_MIN_SECONDS_UNHEARD if no_speech_prob >= NO_SPEECH_SUSPECT
+             else SUSPECT_MIN_SECONDS)
+    if seconds < floor:
         return False
     return len("".join(content.split())) / seconds < HALLUCINATION_MAX_RATE
 
@@ -675,37 +766,171 @@ def wrap_caption(text):
     return "\n".join(folded)
 
 
+def breaks_between(earlier, later):
+    """Is the join between these two words somewhere a cue may end?
+
+    Either the speaker stopped long enough for the pause to be audible, or the
+    earlier word closed a thought. Both are places a reader expects the line
+    to change; the column limit is not.
+    """
+    if later.start - earlier.end >= CUE_BREAK_PAUSE:
+        return True
+    tail = earlier.word.strip()[-1:]
+    return tail in SENTENCE_END or tail in CLAUSE_END
+
+
+def overflows(text):
+    """Would this cue need more lines than it is allowed, once folded?
+
+    Asked of the folding itself rather than of a column count, because the
+    two do not agree: a line ends at the last word that fits, so a cue of
+    exactly two lines' worth of columns routinely folds onto three. Only the
+    fold knows, and it is the fold that reaches the screen.
+    """
+    return len(wrap_caption(text).split("\n")) > SUBTITLE_MAX_LINES
+
+
+def split_cue(segment):
+    """Cut one segment into cues that begin and end where its words do.
+
+    A segment is whatever Whisper closed on, which is frequently a whole
+    sentence - too wide for the frame and too long to read at once. Folding it
+    onto a third and fourth line is not the answer; ending one cue and
+    starting another is. Word timings say where to cut and what time to give
+    each piece, so a cue that used to be placed by dividing a span now lands
+    on the words themselves.
+
+    The timing matters just as much as the cut. A segment that ran longer than
+    a cue is allowed to used to be clamped at ten seconds, which took the line
+    off the screen while its own words were still being spoken - measured on a
+    run of dense speech, two cues in eleven lost their ending that way. A cue
+    cut from the words ends on the last of them, so it can neither outlast the
+    speech it carries nor be taken down in the middle of it.
+
+    Word timings are asked for but not guaranteed, and alignment can come back
+    covering less than the segment said. Either way the segment is returned
+    whole, timed and clamped exactly as it was before any of this.
+    """
+    text = segment.text.strip()
+    words = [word for word in (getattr(segment, "words", None) or []) if word.word]
+    if not words:
+        return [(segment.start, segment.end, text)]
+
+    # Alignment that lost or altered a character cannot be trusted to place a
+    # cut, and the transcript matters more than the timing.
+    spoken = "".join("".join(word.word.split()) for word in words)
+    if spoken != "".join(text.split()):
+        return [(segment.start, segment.end, text)]
+
+    width = display_width(text)
+    span = words[-1].end - words[0].start
+    # However many cues it takes to satisfy whichever limit binds harder.
+    pieces = max(1, ceil(width / CUE_MAX_COLUMNS),
+                 ceil(span / MAX_SUBTITLE_DURATION))
+    # Aim for even pieces rather than filling each one up: a cue should not
+    # break as one full screen and one trailing word, for the same reason a
+    # line should not. Filling to the limit and hoping for a pause is what
+    # leaves the scrap - continuous speech offers no pause, so the break lands
+    # at the margin and the remainder is a word or two with no time of its own.
+    target = width / pieces
+
+    cues, taken, filled, pending = [], [], 0, ""
+    for word in words:
+        if taken and (
+            overflows(pending + word.word)
+            or word.end - taken[0].start > MAX_SUBTITLE_DURATION
+            or filled >= target
+            or (filled >= target * NATURAL_BREAK_SHARE
+                and breaks_between(taken[-1], word))
+        ):
+            cues.append((taken, pending))
+            taken, filled, pending = [], 0, ""
+        taken.append(word)
+        filled += display_width(word.word)
+        pending += word.word
+    if taken:
+        cues.append((taken, pending))
+
+    # Cutting at a full stop near the end of a segment can leave a scrap - a
+    # word or two, on screen for a fraction of a second, with nowhere to
+    # borrow time from because the next cue begins where it ends. Hand it back
+    # to the cue it was cut from whenever that one still has the room.
+    joined = [cues[0]]
+    for words_in, text_of in cues[1:]:
+        before_words, before_text = joined[-1]
+        if (words_in[-1].end - words_in[0].start < MIN_SUBTITLE_DURATION
+                and not overflows(before_text + text_of)
+                and words_in[-1].end - before_words[0].start
+                <= MAX_SUBTITLE_DURATION):
+            joined[-1] = (before_words + words_in, before_text + text_of)
+        else:
+            joined.append((words_in, text_of))
+
+    # A single word too wide for the lines it is allowed is left alone here:
+    # there is nowhere to cut it, and wrap_caption breaks it as a last resort.
+    return [
+        (words_in[0].start, words_in[-1].end, text_of.strip())
+        for words_in, text_of in joined
+    ]
+
+
+def readable_duration(content):
+    """How long this cue has to be on screen to be read at all.
+
+    Long enough not to be a flash, and long enough that its characters do not
+    go past faster than they can be taken in. Both are floors the timing pass
+    reaches for inside the gap after a cue; neither is ever met by taking time
+    from the cue that follows, so neither is guaranteed.
+    """
+    return timedelta(seconds=max(
+        MIN_SUBTITLE_DURATION,
+        display_width("".join(content.split())) / MAX_READING_RATE,
+    ))
+
+
 def build_subtitles(segments):
     """Convert Whisper segments to srt.Subtitle, dropping empty ones."""
     subtitles = []
-    stretched = looping = 0
+    stretched = looping = unheard = 0
     for segment in segments:
         content = segment.text.strip()
         if not content:
             continue
 
-        start = timedelta(seconds=segment.start)
-        end = timedelta(seconds=segment.end)
-        # Both tests read the span, so both come before the clamp below, which
-        # would destroy the evidence.
-        span = (end - start).total_seconds()
-        if is_stretched(content, span):
-            logging.debug("Dropping %.0fs of silence written up as %r", span, content)
+        # Both tests read the segment's own span, not the span of the cues cut
+        # out of it below: an invented line is invented as a whole, and it is
+        # the window it was stretched across that gives it away.
+        span = segment.end - segment.start
+        silent = getattr(segment, "no_speech_prob", 0.0) or 0.0
+        if is_stretched(content, span, silent):
+            logging.debug(
+                "Dropping %.0fs of silence written up as %r (no_speech_prob "
+                "%.2f)", span, content, silent,
+            )
             stretched += 1
+            # Count what only the silence reading caught, so the threshold can
+            # be judged against a real run rather than argued about.
+            unheard += span < SUSPECT_MIN_SECONDS
             continue
         if is_looping(content, span):
             logging.debug("Dropping %.0fs of %r on a loop", span, content)
             looping += 1
             continue
 
-        # A short line isolated in a long silence can still stretch for minutes.
-        # Clamping only ever shortens a cue, so it cannot introduce overlaps.
-        if span > MAX_SUBTITLE_DURATION:
-            end = start + timedelta(seconds=MAX_SUBTITLE_DURATION)
-
-        subtitles.append(
-            srt.Subtitle(index=0, start=start, end=end, content=wrap_caption(content))
-        )
+        for begins, ends, text in split_cue(segment):
+            if not text:
+                continue
+            start = timedelta(seconds=begins)
+            end = timedelta(seconds=ends)
+            # A segment with no usable word timings still arrives whole, and a
+            # short line isolated in a long silence can stretch for minutes.
+            # Clamping only shortens a cue, so it cannot introduce overlaps.
+            if ends - begins > MAX_SUBTITLE_DURATION:
+                end = start + timedelta(seconds=MAX_SUBTITLE_DURATION)
+            subtitles.append(
+                srt.Subtitle(index=0, start=start, end=end,
+                             content=wrap_caption(text))
+            )
 
     if stretched or looping:
         counted = [
@@ -720,6 +945,12 @@ def build_subtitles(segments):
             "Dropped %s - lines Whisper invented rather than heard; run with "
             "debug logging to see them.", " and ".join(counted),
         )
+        if unheard:
+            logging.info(
+                "%d of those ran shorter than %.0fs and were only recognised "
+                "because Whisper reported the window as silent.",
+                unheard, SUSPECT_MIN_SECONDS,
+            )
     subtitles = drop_repeat_runs(subtitles)
 
     # One pass for timing. Whisper both overlaps cues by a fraction of a second
@@ -727,14 +958,14 @@ def build_subtitles(segments):
     # off the next one and then given as much of the gap after it as it needs
     # to be readable. Both only ever move an end, never a start, so the cues
     # stay in order.
-    minimum = timedelta(seconds=MIN_SUBTITLE_DURATION)
     for position, subtitle in enumerate(subtitles):
         following = subtitles[position + 1] if position + 1 < len(subtitles) else None
-        ceiling = following.start if following else subtitle.end + minimum
+        needed = readable_duration(subtitle.content)
+        ceiling = following.start if following else subtitle.end + needed
         if subtitle.end > ceiling:
             subtitle.end = ceiling
-        if subtitle.end - subtitle.start < minimum:
-            subtitle.end = min(ceiling, subtitle.start + minimum)
+        if subtitle.end - subtitle.start < needed:
+            subtitle.end = min(ceiling, subtitle.start + needed)
         # A cue the next one starts on top of keeps a sliver, so it stays valid
         # srt rather than becoming a zero-length or reversed entry.
         if subtitle.end <= subtitle.start:
@@ -789,14 +1020,25 @@ class SubtitleMakerApp:
         settings = ttk.LabelFrame(self.root, text="Model")
         settings.pack(pady=(12, 6), **pad)
 
-        self.model_var = tk.StringVar(
-            value=self._remembered("model", DEFAULT_MODEL, MODELS)
+        # No list of allowed values here: the box takes any CTranslate2
+        # repository id or local directory, so a saved name that is not in
+        # MODELS is a custom model rather than a stale setting.
+        self.model_var = tk.StringVar(value=self._remembered("model", DEFAULT_MODEL))
+        self._labelled_combo(
+            settings, "Model:", self.model_var, MODELS, editable=True
         )
-        model_combo = self._labelled_combo(settings, "Model:", self.model_var, MODELS)
-        model_combo.bind("<<ComboboxSelected>>", lambda _e: self._update_model_note())
+        # Traced rather than bound to <<ComboboxSelected>>, so the note keeps
+        # up with a name being typed as well as one picked off the list.
+        self.model_var.trace_add("write", lambda *_: self._update_model_note())
 
         self.model_note = ttk.Label(settings, foreground="gray", wraplength=520)
-        self.model_note.pack(anchor="w", padx=16, pady=(0, 6))
+        self.model_note.pack(anchor="w", padx=16, pady=(0, 0))
+        ttk.Label(
+            settings,
+            text="Any CTranslate2 model id or folder can be typed in here.",
+            foreground="gray",
+            wraplength=520,
+        ).pack(anchor="w", padx=16, pady=(0, 6))
 
         self.device_var = tk.StringVar(
             value=self._remembered("device", DEFAULT_DEVICE, DEVICES)
@@ -967,11 +1209,13 @@ class SubtitleMakerApp:
         fallback.configure(size=size)
         return fallback
 
-    def _labelled_combo(self, parent, label, variable, values):
+    def _labelled_combo(self, parent, label, variable, values, editable=False):
         row = ttk.Frame(parent)
         row.pack(fill="x", padx=8, pady=4)
         ttk.Label(row, text=label, width=16).pack(side="left")
-        combo = ttk.Combobox(row, textvariable=variable, state="readonly")
+        combo = ttk.Combobox(
+            row, textvariable=variable, state="normal" if editable else "readonly"
+        )
         combo["values"] = values
         combo.pack(side="left", fill="x", expand=True)
         return combo
@@ -1106,7 +1350,8 @@ class SubtitleMakerApp:
 
     def _update_model_note(self):
         capability = model_capability(self.model_var.get())
-        conflict = self.translate_var.get() and capability != "full"
+        conflict = (self.translate_var.get()
+                    and capability not in CAN_BE_ASKED_TO_TRANSLATE)
         self.model_note.config(
             text=("! " if conflict else "") + MODEL_NOTES[capability],
             foreground="#b26a00" if conflict else "gray",
@@ -1116,13 +1361,19 @@ class SubtitleMakerApp:
         """Warn before a model/translate combination that silently misbehaves."""
         model_size = self.model_var.get()
         capability = model_capability(model_size)
-        if not self.translate_var.get() or capability == "full":
+        if (not self.translate_var.get()
+                or capability in CAN_BE_ASKED_TO_TRANSLATE):
             return True
 
         if capability == "english_only":
             detail = (
                 f"'{model_size}' was trained on English audio only. On any other "
                 "language it produces garbage."
+            )
+        elif capability == "japanese_only":
+            detail = (
+                f"'{model_size}' was trained on Japanese audio only, and not on "
+                "the translation task at all."
             )
         else:
             detail = (
@@ -1144,6 +1395,17 @@ class SubtitleMakerApp:
 
     def start_batch(self):
         if self.worker and self.worker.is_alive():
+            return
+
+        # The box is free text now, so it can be left empty or full of spaces.
+        # Catch that here rather than in the worker, where it would surface as
+        # a download failure several steps from the cause.
+        if not self.model_var.get().strip():
+            messagebox.showwarning(
+                "No model",
+                "Pick a model from the list, or type the id of a CTranslate2 "
+                "model or the path to a folder holding one.",
+            )
             return
 
         if not self._confirm_model_choice():
@@ -1169,7 +1431,7 @@ class SubtitleMakerApp:
     def _collect_settings(self):
         """Snapshot every control. Must run on the Tk main thread."""
         return Settings(
-            model_size=self.model_var.get(),
+            model_size=self.model_var.get().strip(),
             device_label=self.device_var.get(),
             precision_label=self.precision_var.get(),
             language=LANGUAGES[self.language_var.get()],
@@ -1292,6 +1554,11 @@ class SubtitleMakerApp:
         # Both pipelines take the windows planned here instead of running
         # their own silence filter, which would splice the surviving speech
         # together before Whisper ever saw it.
+        #
+        # Both are also asked for word timestamps, which faster-whisper reads
+        # off the decoder's own cross-attention. A segment's bounds are only
+        # where Whisper closed the window; the words are where the speech was,
+        # and split_cue spends them on cue boundaries and cue ends.
         if settings.batched:
             pipeline = BatchedInferencePipeline(model=model)
 
@@ -1314,6 +1581,7 @@ class SubtitleMakerApp:
                     # ~25% speed and brings segment length back in line with
                     # sequential mode.
                     without_timestamps=False,
+                    word_timestamps=True,
                 )
 
             return batched
@@ -1329,6 +1597,7 @@ class SubtitleMakerApp:
                 # every thirty seconds.
                 clip_timestamps="0",
                 condition_on_previous_text=False,
+                word_timestamps=True,
             )
 
         return sequential
