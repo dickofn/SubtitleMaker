@@ -37,10 +37,11 @@ APP_DIR = os.path.dirname(os.path.abspath(__file__))
 LOG_PATH = os.path.join(APP_DIR, "error.log")
 CONFIG_PATH = os.path.join(APP_DIR, "settings.json")
 
-# Every size faster-whisper knows by name, plus two conversions from Hugging
-# Face that cover cases the stock weights handle poorly. The dropdown is
-# editable, so any other CTranslate2 repository id or local directory can be
-# typed into it instead of picked from this list.
+# Every size faster-whisper knows by name. The dropdown is editable, so any
+# other CTranslate2 repository id or local directory can be typed into it
+# instead of picked from this list - but only what is listed here has been run
+# against a feature film and measured, and two that were are deliberately
+# absent. See "Models that are not offered" in the README.
 MODELS = (
     "large-v3",
     "large-v3-turbo",
@@ -59,13 +60,13 @@ MODELS = (
     "distil-large-v2",
     "distil-medium.en",
     "distil-small.en",
-    "kotoba-tech/kotoba-whisper-v2.0-faster",
-    "nyrahealth/faster_CrisperWhisper",
 )
 DEFAULT_MODEL = "large-v3"
 
 # Named models whose capability cannot be read off the name. Everything else
-# is recognised by its suffix or prefix below.
+# is recognised by its suffix or prefix below. These two are not offered in
+# the dropdown but are still recognised, because the box is editable and
+# someone may well type one in.
 ENGLISH_ONLY_MODELS = {"nyrahealth/faster_CrisperWhisper"}
 JAPANESE_ONLY_MODELS = {"kotoba-tech/kotoba-whisper-v2.0-faster"}
 # Capabilities that may be asked for a translation without the request being

@@ -660,6 +660,35 @@ class ModelCapability(unittest.TestCase):
         for name in sm.MODELS:
             self.assertIn(sm.model_capability(name), sm.MODEL_NOTES, name)
 
+    def test_the_model_that_crashes_is_not_offered(self):
+        """kotoba-whisper v2.0 segfaults when asked for word timestamps.
+
+        Its configuration carries the alignment heads of the model it was
+        distilled from, pointing at decoder layer 25 of a decoder that no
+        longer has one. The app always asks for word timestamps now, so
+        offering it in the dropdown offers a crash. It stays recognised,
+        because the box is editable and someone may type it in, but it is not
+        put in front of anyone. Nothing here can detect the fault in advance:
+        CTranslate2 exposes no layer count, and a segmentation fault cannot be
+        caught.
+        """
+        self.assertNotIn("kotoba-tech/kotoba-whisper-v2.0-faster", sm.MODELS)
+        self.assertEqual(
+            sm.model_capability("kotoba-tech/kotoba-whisper-v2.0-faster"),
+            "japanese_only")
+
+    def test_the_model_that_drops_a_third_of_the_words_is_not_offered(self):
+        """Measured on a feature film: 8,583 words where others gave ~13,000."""
+        self.assertNotIn("nyrahealth/faster_CrisperWhisper", sm.MODELS)
+        self.assertEqual(
+            sm.model_capability("nyrahealth/faster_CrisperWhisper"),
+            "english_only")
+
+    def test_every_offered_model_is_one_faster_whisper_knows(self):
+        """Nothing in the dropdown needs a repository id or a download guess."""
+        for name in sm.MODELS:
+            self.assertNotIn("/", name, name)
+
     def test_only_a_model_that_can_translate_is_offered_by_default(self):
         """The dropdown's default must never be the one that warns."""
         self.assertIn(sm.model_capability(sm.DEFAULT_MODEL),

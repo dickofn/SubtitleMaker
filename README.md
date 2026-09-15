@@ -110,13 +110,54 @@ The first run of any model downloads it from Hugging Face and caches it.
 | `large-v3-turbo` | Multilingual transcription, but never trained to translate |
 | `medium.en`, `small.en`, `base.en`, `tiny.en` | English audio only |
 | `distil-large-v3.5`, `distil-large-v3`, `distil-large-v2`, `distil-medium.en`, `distil-small.en` | English audio only — faster than the sizes they are distilled from |
-| `kotoba-tech/kotoba-whisper-v2.0-faster` | Japanese audio only, and not trained to translate |
-| `nyrahealth/faster_CrisperWhisper` | English audio only — transcribes verbatim, disfluencies included |
 
 The box is editable: anything else that CTranslate2 can load works too, either
 a Hugging Face repository id or the path to a folder holding a converted
 model. Capability is read off the name, so a model that is neither on this
 list nor recognisable from it is left alone rather than guessed at.
+
+#### Which one to pick
+
+Measured on one 146-minute film against its published English subtitle, every
+model through the same cue rules. The error rate is computed over time
+windows, so a model that puts the right words at the wrong moment is charged
+twice for it — once where the word is missing and once where it reappears.
+Widening the window forgives displacement but not a wrong word, which is what
+separates the two columns:
+
+| Model | Speed | Placed | Transcript | Cue onsets within 0.5s |
+| --- | --- | --- | --- | --- |
+| `large-v3-turbo` | 74× | 0.148 | 0.126 | 61.7% |
+| `medium.en` | 60× | 0.187 | 0.158 | 61.4% |
+| `large-v3` | 49× | 0.176 | 0.136 | 51.5% |
+| `distil-large-v3.5` | 70× | 0.405 | 0.117 | 25.6% |
+
+`large-v3-turbo` was the best of these for subtitles and the fastest, at the
+cost of the translate task it was never trained for. `distil-large-v3.5` heard
+the most words of any of them and placed them worst by a wide margin — its cue
+onsets scatter across 1.6 seconds against turbo's 0.5 — which matters here
+because every cue boundary is now cut from word timings. The default stays
+`large-v3`, which can translate.
+
+Those figures come from one film. They are worth what one film is worth.
+
+#### Models that are not offered
+
+Both of these load and both are real; neither is in the dropdown, and both can
+still be typed into it deliberately.
+
+- `kotoba-tech/kotoba-whisper-v2.0-faster` — **crashes the process** when word
+  timestamps are asked for, which this app always does. Its configuration
+  carries the alignment heads of the model it was distilled from, pointing at
+  decoder layer 25 of a decoder that no longer has one, and the lookup runs
+  off the end. It transcribes normally with word timestamps turned off. The
+  fault is in how the model is packaged and there is nothing here that can
+  detect it in advance: CTranslate2 does not expose a layer count, and the
+  crash is a segmentation fault, which cannot be caught.
+- `nyrahealth/faster_CrisperWhisper` — transcribes verbatim, which is what it
+  is for, but on feature-film audio it returned 8,583 words where the others
+  returned about 13,000 against a reference carrying 14,098, at an error rate
+  of 0.564 against their 0.12 to 0.16.
 
 The app shows the selected model's capability underneath the dropdown and warns
 before starting if the choice conflicts with the requested task.
