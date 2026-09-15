@@ -147,13 +147,24 @@ Whisper's translate task only ever outputs English, and `large-v3-turbo` was
 never trained on it, so a translation has to start somewhere else — the app
 warns and offers `large-v3`.
 
-Measured on a 125-minute Japanese film against its published English subtitle,
+Measured on a 110-minute Japanese film against its published English subtitle,
 which is a human translation of the same dialogue:
 
 | Model | Speed | chrF | Onsets within 0.5s | Words |
 | --- | --- | --- | --- | --- |
 | `large-v2` | 39× | 0.456 | 71.6% | 8,063 |
 | `large-v3` | 40× | 0.426 | 57.1% | 7,455 |
+
+That gap did not survive a second film. A 125-minute Japanese one carries a
+published translation into a third language — no use for scoring content, but
+cue onsets are where the speech is whatever language the words are in, and
+there the two models come out level: 50.8% against 48.9% within half a second,
+with `large-v2` the wider spread of the two at 1.45 seconds against 1.00.
+
+So the translation default stays `large-v3`. One film showed a wide margin,
+the next showed none, and a difference that does not reproduce is not a
+difference worth changing a default for. `large-v2` is in the list for anyone
+who wants to try it on their own material.
 
 Word error rate is the wrong tool for a translation — two good translations of
 one line share meaning and almost no exact wording, and both of these score
