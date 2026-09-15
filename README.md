@@ -106,8 +106,8 @@ The first run of any model downloads it from Hugging Face and caches it.
 
 | Model | Capability |
 | --- | --- |
-| `large-v3`, `large-v2`, `large-v1`, `medium`, `small`, `base`, `tiny` | Multilingual — transcribe or translate to English |
-| `large-v3-turbo` (default) | Multilingual transcription, but never trained to translate |
+| `large-v3` (default), `large-v2`, `large-v1`, `medium`, `small`, `base`, `tiny` | Multilingual — transcribe or translate to English |
+| `large-v3-turbo` | Multilingual transcription, but never trained to translate |
 | `medium.en`, `small.en`, `base.en`, `tiny.en` | English audio only |
 | `distil-large-v3.5`, `distil-large-v3`, `distil-large-v2`, `distil-medium.en`, `distil-small.en` | English audio only — faster than the sizes they are distilled from |
 
@@ -133,7 +133,14 @@ not a wrong word, which is what separates the two error columns.
 | `medium.en` | 60× / — | 0.187 / — | 0.158 / — | 61.4% / — |
 
 `large-v3-turbo` leads on speed, on placement and on cue onsets on both films,
-which is why it is what opens.
+and is still not the default. There is one model box rather than one per task,
+and turbo was never trained to translate — so defaulting to it would leave
+half of what the app offers broken until you noticed the warning. `large-v3`
+is the one that does both.
+
+**If you only transcribe English, pick `large-v3-turbo` from the list.** It is
+faster and better at it on both films measured, and the translate task it
+cannot do is one you are not asking for.
 
 `distil-large-v3.5` heard more words than anything else on both films and
 placed them worst by a wide margin. Its cue onsets scatter across 1.6 seconds
