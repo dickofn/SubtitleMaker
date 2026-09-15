@@ -18,6 +18,7 @@ length, the same rate, the same side of the boundary - rather than anything
 lifted from a transcript.
 """
 
+import os
 import unittest
 from datetime import timedelta
 
@@ -375,6 +376,62 @@ class OutputPaths(unittest.TestCase):
         taken = {"/media/video.srt"}
         self.assertEqual(sm.unique_srt_path("/media/video.mkv", taken),
                          "/media/video.mkv.srt")
+
+
+class RememberedChoices(unittest.TestCase):
+    """The model box opens where it was left, whatever was left in it.
+
+    The box takes free text, so a saved name is not checked against the list -
+    a name that is not in MODELS is a custom model, not a stale setting. What
+    is still checked is the type, because a hand-edited or newer settings file
+    can hold anything.
+    """
+
+    def setUp(self):
+        import tempfile
+
+        self.tmp = tempfile.mkdtemp()
+        self.path = os.path.join(self.tmp, "settings.json")
+        self.real_path = sm.CONFIG_PATH
+        sm.CONFIG_PATH = self.path
+
+    def tearDown(self):
+        import shutil
+
+        sm.CONFIG_PATH = self.real_path
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_a_choice_survives_the_round_trip(self):
+        for model in ("large-v3-turbo", "medium.en", "someone/their-whisper",
+                      "/home/me/models/my-whisper"):
+            sm.save_config({"model": model})
+            self.assertEqual(sm.load_config()["model"], model)
+
+    def test_an_unreadable_file_falls_back_rather_than_raising(self):
+        with open(self.path, "w", encoding="utf-8") as handle:
+            handle.write('{"model": "large-v3"')      # cut off mid-write
+        self.assertEqual(sm.load_config(), {})
+
+    def test_a_file_that_is_not_an_object_falls_back(self):
+        with open(self.path, "w", encoding="utf-8") as handle:
+            handle.write('["large-v3"]')
+        self.assertEqual(sm.load_config(), {})
+
+    def test_a_missing_file_is_not_an_error(self):
+        self.assertEqual(sm.load_config(), {})
+
+    def test_the_previous_choices_survive_a_failed_write(self):
+        """The run that dies mid-save is the one that must not lose them."""
+        sm.save_config({"model": "large-v3-turbo"})
+        # A directory where the temporary file wants to be: the write fails,
+        # and the point is that it fails without taking the old file with it.
+        os.mkdir(self.path + ".tmp")
+        sm.save_config({"model": "something-else"})
+        self.assertEqual(sm.load_config()["model"], "large-v3-turbo")
+
+    def test_no_temporary_file_is_left_behind(self):
+        sm.save_config({"model": "large-v3"})
+        self.assertFalse(os.path.exists(self.path + ".tmp"))
 
 
 class StatusLine(unittest.TestCase):

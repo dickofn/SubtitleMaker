@@ -11,6 +11,8 @@ __pycache__/
 error.log
 error.log.*
 settings.json
+# Only exists mid-save, but a process that dies can strand one.
+settings.json.tmp
 
 # Editor / backup files
 *.bak

@@ -34,7 +34,10 @@ Runs on Windows, Linux, and macOS.
   a running batch can be stopped after the current file.
 - **Built-in log panel** — collapsible, with a rotating `error.log` on disk.
 - **Remembers your choices** — model, device, precision, language and the
-  option switches all come back as you left them.
+  option switches all come back as you left them, including a model typed in
+  by hand. They are saved when a batch starts as well as when the window
+  closes, so a run that ends in a crash rather than a close does not cost you
+  the settings too.
 
 ## Requirements
 
@@ -304,6 +307,7 @@ transcription time (median of five runs, batched, CUDA, `float16`).
 | `requirements.txt` | Pinned dependencies |
 | `error.log` | Rotating log, 1 MB × 3 (git-ignored) |
 | `settings.json` | Model, device, language and option choices (git-ignored) |
+| `settings.json.tmp` | Only ever exists mid-save; the file is written and moved into place |
 
 `error.log` records the full path and filename of every file processed. It is
 git-ignored for that reason — check before sharing it.

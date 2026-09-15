@@ -365,12 +365,24 @@ def load_config():
 
 
 def save_config(config):
-    """Persist UI preferences. A failure here must never break the app."""
+    """Persist UI preferences. A failure here must never break the app.
+
+    Written the same way the subtitles are: to a temporary file and then moved
+    into place, so a process that dies mid-write leaves the previous choices
+    intact rather than a half-written file. Losing them is a small thing, but
+    it is a small thing that happens on exactly the runs that went worst.
+    """
+    tmp_path = CONFIG_PATH + ".tmp"
     try:
-        with open(CONFIG_PATH, "w", encoding="utf-8") as handle:
+        with open(tmp_path, "w", encoding="utf-8") as handle:
             json.dump(config, handle, indent=2)
+        os.replace(tmp_path, CONFIG_PATH)
     except OSError as exc:
         logging.warning("Could not save %s (%s).", CONFIG_PATH, exc)
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
 
 
 @dataclass(frozen=True)
@@ -1454,6 +1466,12 @@ class SubtitleMakerApp:
         )
         if not paths:
             return
+
+        # Save the choices now rather than only on the way out. A batch runs
+        # for hours, and the runs that do not reach a clean close - a crash, a
+        # kill, a machine that goes down - are the ones where having to pick
+        # the model again is most annoying.
+        self._remember()
 
         self.stop_event.clear()
         self.set_running(True)
