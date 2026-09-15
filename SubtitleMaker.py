@@ -263,6 +263,15 @@ HALLUCINATION_MAX_RATE = 1.0
 LOOP_MIN_REPETITION = 0.9
 # Below this many characters a repetition score means nothing either way.
 LOOP_MIN_CHARS = 8
+# The length gate above is also a hole. A loop can come back short and dense -
+# one token hundreds of columns wide, held for a second - and pass for speech
+# on the strength of not having run long. Nobody says that much that fast, and
+# the gap is not a close one: over 4887 segments from three films in two
+# languages, eleven were both short and at least 90% one repeated unit, ten of
+# them genuine at no more than 26 columns a second, and the eleventh, which
+# was a single token of 890 columns, at 636. This bar sits between the two
+# with four times the headroom below it and six times above.
+IMPOSSIBLE_RATE = 100.0
 # Whisper reports, for each window it decodes, how sure it is that nothing was
 # said in it. A window it calls silent still comes back with text whenever the
 # decoder had to produce something, and that text was invented. The figure is
@@ -669,10 +678,21 @@ def is_looping(content, seconds):
     1.0 - so length is what separates the two. Saying a word three times over
     takes a second or two. A loop runs to the end of the window, however long
     that is.
+
+    Length is not the only thing that separates them, though, and waiting for
+    it lets a short, dense loop through: a token hundreds of columns wide held
+    for a second reads as speech to every test here, and then folds onto
+    twenty lines. Rate catches that one without touching the brief repetitions
+    real speech is full of, which are short because there is little of them
+    rather than because they were said impossibly fast.
     """
-    if seconds < SUSPECT_MIN_SECONDS:
+    if repetition(content) < LOOP_MIN_REPETITION:
         return False
-    return repetition(content) >= LOOP_MIN_REPETITION
+    if seconds >= SUSPECT_MIN_SECONDS:
+        return True
+    return seconds > 0 and (
+        display_width("".join(content.split())) / seconds > IMPOSSIBLE_RATE
+    )
 
 
 def display_width(text):

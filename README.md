@@ -185,13 +185,28 @@ Cues are tidied on the way out:
 - **Nothing invented.** See [Troubleshooting](#troubleshooting) for the three
   kinds of made-up line that are removed automatically.
 
-On a 196-second sample of continuous synthesized speech read by `large-v3`,
-cutting on words rather than on segments took the cues that needed three or
-more lines from 6 of 11 to 0 of 20 — six lines at worst before, two after —
-and removed both cases where the 10-second cap had taken a line off the screen
-while its own words were still being spoken. The transcript is untouched by
-any of it: 185 words either way. Asking for word timings cost 2% of
-transcription time on that run (median of five, batched, CUDA, `float16`).
+Measured against the published English subtitles of two feature films, and
+the published translation of a third, all read by `large-v3`:
+
+| | reference | before | after |
+| --- | --- | --- | --- |
+| cues needing 3+ lines, 146-min film | 1 | 156 | 0 |
+| cues needing 3+ lines, 149-min film | 1 | 120 | 0 |
+| most lines in any one cue | 3 | 22 | 2 |
+| cues faster than 20 columns/s | 80 | 91 | 61 |
+| reference cue onsets matched within 0.5s | — | 47.0% | 51.5% |
+| word error rate against the reference | — | 0.198 | 0.176 |
+
+The transcript itself is untouched by any of it; the lower error rate is the
+same words landing in the right time window. That reference is a published
+subtitle rather than a verbatim transcript, so the rate is a floor on
+agreement and not a count of mistakes — useful for comparing two builds
+against one yardstick, not as an absolute.
+
+Japanese is the case where none of this changes much: its segments already fit
+two lines at 21 characters, so almost nothing needs splitting, and the cue
+onsets moved by hundredths of a second. Asking for word timings cost 2% of
+transcription time (median of five runs, batched, CUDA, `float16`).
 
 ## Files
 
@@ -290,6 +305,14 @@ is nothing to remove:
   11 more over the same 579 cues. Length is what makes this safe: real speech
   repeats too, and a word said three times in a row scores just as high, but
   it lasts under two seconds and is kept.
+
+  A loop can also come back short and dense - one unbroken token hundreds of
+  columns wide, held for about a second - and the length gate is exactly what
+  lets it through. Such a cue is dropped on its rate instead, above 100
+  columns a second. Over 4887 segments from three feature films in two
+  languages, eleven were both short and 90% one repeated unit: ten were
+  genuine and none exceeded 26 columns a second, and the one invented line ran
+  at 636.
 - Runs of three or more identical consecutive lines are collapsed to one.
 
 The log says how many of each were dropped, and debug logging prints them.

@@ -175,6 +175,43 @@ class InventedLines(unittest.TestCase):
         self.assertFalse(sm.is_looping("はいはいはいはい", 1.86))
         self.assertFalse(sm.is_looping("Yes, yes, yes.", 2.00))
 
+    def test_drops_a_loop_that_came_back_short_and_dense(self):
+        """The length gate lets a fast one through; rate is what catches it.
+
+        Measured over 4887 segments from three films in two languages: the one
+        invented line of this shape was a single token of 890 columns held for
+        1.4 seconds, and the ten genuine short repetitions among them ran at
+        no more than 26 columns a second.
+        """
+        token = "Ha" * 445
+        self.assertEqual(sm.display_width(token), 890)
+        self.assertTrue(sm.is_looping(token, 1.40))
+
+    def test_keeps_a_short_repetition_said_at_a_human_rate(self):
+        """Brief because there is little of it, not because it was said fast."""
+        for text, seconds in (("はいはいはいはい", 1.86),
+                              ("no no no no no", 1.14),
+                              ("ああああああ", 1.16)):
+            columns = sm.display_width("".join(text.split()))
+            self.assertLess(columns / seconds, 26)
+            self.assertFalse(sm.is_looping(text, seconds), text)
+
+    def test_a_long_loop_is_judged_on_length_as_before(self):
+        """Rate is an addition to the length gate, never a replacement."""
+        slow = "Ah, " * 50
+        self.assertLess(
+            sm.display_width("".join(slow.split())) / 29.98, sm.IMPOSSIBLE_RATE)
+        self.assertTrue(sm.is_looping(slow, 29.98))
+
+    def test_rate_alone_is_not_enough(self):
+        """Dense and fast, but not a repetition: left alone."""
+        varied = "the quick brown fox jumps over a lazy dog"
+        self.assertLess(sm.repetition(varied), sm.LOOP_MIN_REPETITION)
+        self.assertFalse(sm.is_looping(varied, 0.1))
+
+    def test_a_zero_length_segment_does_not_divide_by_it(self):
+        self.assertFalse(sm.is_looping("Ha" * 445, 0.0))
+
     def test_too_few_characters_to_score(self):
         """A word doubled is not evidence of anything."""
         self.assertEqual(sm.repetition("はいはい"), 0.0)
